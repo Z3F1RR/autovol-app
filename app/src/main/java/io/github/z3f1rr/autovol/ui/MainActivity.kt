@@ -1,0 +1,96 @@
+package io.github.z3f1rr.autovol.ui
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import io.github.z3f1rr.autovol.AutoVol
+import io.github.z3f1rr.autovol.AutoVolService
+
+class MainActivity : ComponentActivity() {
+    private val micRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) enableAfterPermissions() else AutoVol.log.add("разрешение на микрофон не выдано")
+    }
+    private val notifRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
+        handleResume(intent)
+        setContent {
+            AutoVolTheme {
+                var showLog by rememberSaveable { mutableStateOf(false) }
+                BackHandler(enabled = showLog) { showLog = false }
+                if (showLog) {
+                    LogScreen(onBack = { showLog = false })
+                } else {
+                    MainScreen(onToggle = ::toggle, onOpenLog = { showLog = true })
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleResume(intent)
+    }
+
+    private var resumeRequested = false
+
+    private fun handleResume(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_RESUME, false) == true) {
+            intent.removeExtra(EXTRA_RESUME)
+            resumeRequested = true
+        }
+    }
+
+    /** "Tap to resume" notification after reboot: once visible, a microphone FGS is allowed. */
+    override fun onResume() {
+        super.onResume()
+        if (resumeRequested) {
+            resumeRequested = false
+            if (AutoVol.prefs.enabled && hasMic()) AutoVolService.startFromUi(this)
+        }
+    }
+
+    private fun hasMic() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    private fun toggle(on: Boolean) {
+        if (!on) {
+            AutoVol.prefs.enabled = false
+            AutoVolService.stop(this)
+            AutoVol.log.add("выключено пользователем")
+            return
+        }
+        if (!hasMic()) {
+            micRequest.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        enableAfterPermissions()
+    }
+
+    private fun enableAfterPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notifRequest.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        AutoVol.prefs.enabled = true
+        AutoVol.log.add("включено пользователем")
+        AutoVolService.startFromUi(this)
+    }
+
+    companion object {
+        const val EXTRA_RESUME = "resume"
+    }
+}
