@@ -21,7 +21,7 @@ class AndroidPlatform(private val ctx: Context) : Platform {
     private val nm = ctx.getSystemService(NotificationManager::class.java)
     private val ui = ctx.getSystemService(UiModeManager::class.java)
     private val bm = ctx.getSystemService(BatteryManager::class.java)
-    private val meter = Meter(ctx)
+    val meter = Meter(ctx)
 
     override fun nowMs() = System.currentTimeMillis()
 

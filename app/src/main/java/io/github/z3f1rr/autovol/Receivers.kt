@@ -13,7 +13,7 @@ class AlarmReceiver : BroadcastReceiver() {
             svc.requestCycle()
         } else if (AutoVol.prefs.enabled) {
             // Process was killed: try to come back (works in full-access mode).
-            AutoVolService.startFromBackground(context, "будильник")
+            AutoVolService.startFromBackground(context, "повторная попытка")
         }
     }
 }
@@ -51,7 +51,7 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         if (!AutoVol.prefs.enabled) return
-        val why = if (intent.action == Intent.ACTION_BOOT_COMPLETED) "загрузка" else "обновление приложения"
+        val why = if (intent.action == Intent.ACTION_BOOT_COMPLETED) AutoVolService.REASON_BOOT else "обновление приложения"
         AutoVolService.startFromBackground(context, why)
     }
 }

@@ -11,7 +11,16 @@ import java.io.IOException
 
 /** Measurement history in a compact binary file (8 bytes per sample, ~7 days ≈ 50 KB). */
 class FileHistoryStore(context: Context) : HistoryStore {
-    private val file = AtomicFile(File(context.filesDir, "history.bin"))
+    private val file = AtomicFile(File(context.filesDir, FILE))
+
+    init {
+        // v1 history was measured without DC removal and would skew calibration.
+        File(context.filesDir, "history.bin").delete()
+    }
+
+    private companion object {
+        const val FILE = "history-v2.bin"
+    }
 
     override fun load(): List<Sample> = try {
         DataInputStream(file.openRead().buffered()).use { inp ->

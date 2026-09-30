@@ -62,6 +62,7 @@ private fun share(ctx: Context) {
         appendLine("AutoVol ${BuildConfigInfo.versionName(ctx)} · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}")
         appendLine("микрофон: ${MicAccess.level(ctx).name.lowercase()} · мин. громкость ${s.minVol}")
         appendLine("пороги сейчас: ${Levels.format(st.levels.ifEmpty { s.levels })}")
+        appendLine("замер: ${AutoVol.platform.meter.diagnostics()}")
         appendLine()
     }
     val send = Intent(Intent.ACTION_SEND)

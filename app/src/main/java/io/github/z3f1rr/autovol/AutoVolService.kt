@@ -25,6 +25,7 @@ class AutoVolService : Service() {
     private val queued = AtomicBoolean(false)
     private var foreground = false
     private var lastNote: String? = null
+    private var diagLogged = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -122,6 +123,12 @@ class AutoVolService : Service() {
             CycleResult(120, "исключение: ${e.javaClass.simpleName} ${e.message}", Outcome.SKIPPED)
         }
         if (r.note != lastNote || " дБ" in r.note) AutoVol.log.add(r.note)
+        if (!diagLogged) {
+            AutoVol.platform.meter.last?.let {
+                diagLogged = true
+                AutoVol.log.add("замер: ${AutoVol.platform.meter.diagnostics()}")
+            }
+        }
         lastNote = r.note
         if (!AutoVol.prefs.enabled || instance !== this) return
         Scheduler.schedule(this, r.waitSec)
@@ -159,6 +166,7 @@ class AutoVolService : Service() {
         private const val EXTRA_FROM_UI = "from_ui"
         private const val EXTRA_REASON = "reason"
         private const val WAKE_MS = 60_000L
+        const val REASON_BOOT = "загрузка"
 
         @Volatile
         var instance: AutoVolService? = null
@@ -180,8 +188,12 @@ class AutoVolService : Service() {
         /** Start after boot/update/process death. Falls back to a "tap to resume" notification. */
         fun startFromBackground(ctx: Context, reason: String) {
             if (MicAccess.level(ctx) != MicAccess.Level.FULL && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                AutoVol.log.add("$reason: базовый режим — ждём нажатия на уведомление")
+                AutoVol.log.add(
+                    "$reason: базовый режим (RECORD_AUDIO=${MicAccess.rawMode(ctx)}) — ждём нажатия на уведомление",
+                )
                 Notifications.showResume(ctx)
+                // Right after boot the appop may not be settled yet: check once more in 2 minutes.
+                if (reason == REASON_BOOT) Scheduler.schedule(ctx, 120)
                 return
             }
             try {

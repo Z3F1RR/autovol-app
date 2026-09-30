@@ -24,5 +24,20 @@ object MicAccess {
         }
     }
 
+    /** Raw appop mode name, for the log. */
+    fun rawMode(ctx: Context): String {
+        val ops = ctx.getSystemService(AppOpsManager::class.java)
+        @Suppress("DEPRECATION")
+        val mode = ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), ctx.packageName)
+        return when (mode) {
+            AppOpsManager.MODE_ALLOWED -> "allow"
+            AppOpsManager.MODE_FOREGROUND -> "foreground"
+            AppOpsManager.MODE_IGNORED -> "ignore"
+            AppOpsManager.MODE_ERRORED -> "deny"
+            AppOpsManager.MODE_DEFAULT -> "default"
+            else -> mode.toString()
+        }
+    }
+
     fun adbCommand(ctx: Context) = "adb shell appops set ${ctx.packageName} RECORD_AUDIO allow"
 }

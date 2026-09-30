@@ -8,13 +8,15 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import io.github.z3f1rr.autovol.core.Analysis
+import io.github.z3f1rr.autovol.core.LevelAnalyzer
 import io.github.z3f1rr.autovol.core.Measurement
-import kotlin.math.log10
 import kotlin.math.max
 
 /**
  * Ambient level measurement: RMS in dBFS over [recSec] seconds of 16 kHz mono PCM16, skipping the
  * first 300 ms (equivalent of `ffmpeg -ss 0.3 ... volumedetect` mean_volume in the script).
+ * Signal analysis (DC removal, digital silence) lives in [LevelAnalyzer].
  */
 class Meter(private val ctx: Context) {
     private val am = ctx.getSystemService(AudioManager::class.java)
@@ -27,7 +29,20 @@ class Meter(private val ctx: Context) {
         }
     }
 
+    /** Diagnostics of the last successful recording. */
+    @Volatile
+    var last: Analysis? = null
+        private set
+
     val sourceName: String get() = if (source == MediaRecorder.AudioSource.UNPROCESSED) "UNPROCESSED" else "MIC"
+
+    fun diagnostics(): String {
+        val a = last ?: return "источник $sourceName, замеров ещё не было"
+        return String.format(
+            java.util.Locale.ROOT, "источник %s, уровень %.1f дБ, смещение DC %.1f дБ, пик %d",
+            sourceName, a.db, a.dcDb, a.peak,
+        )
+    }
 
     @SuppressLint("MissingPermission")
     fun measure(recSec: Int): Measurement {
@@ -48,11 +63,9 @@ class Meter(private val ctx: Context) {
                 return Measurement.Error("запись не началась (микрофон занят?)")
             }
             val total = RATE * recSec
-            val skip = RATE * SKIP_MS / 1000
+            val analyzer = LevelAnalyzer(skip = RATE * SKIP_MS / 1000)
             val buf = ShortArray(RATE / 10)
             var got = 0
-            var sum = 0.0
-            var counted = 0L
             var empty = 0
             while (got < total) {
                 val n = rec.read(buf, 0, minOf(buf.size, total - got))
@@ -61,16 +74,12 @@ class Meter(private val ctx: Context) {
                     if (++empty > 50) return Measurement.Error("AudioRecord не отдаёт данные")
                     continue
                 }
-                for (i in 0 until n) {
-                    if (got + i >= skip) {
-                        val x = buf[i].toDouble()
-                        sum += x * x
-                        counted++
-                    }
-                }
+                analyzer.feed(buf, n)
                 got += n
             }
-            return Measurement.Level(dbfs(sum, counted))
+            val a = analyzer.result()
+            last = a
+            return Measurement.Level(a.db)
         } catch (e: Exception) {
             return Measurement.Error("${e.javaClass.simpleName}: ${e.message}")
         } finally {
@@ -86,12 +95,5 @@ class Meter(private val ctx: Context) {
     companion object {
         const val RATE = 16000
         const val SKIP_MS = 300
-
-        /** Mean power relative to full scale; digital silence maps to -120 like "-inf" in the script. */
-        fun dbfs(sumSquares: Double, n: Long): Double {
-            if (n <= 0 || sumSquares <= 0) return -120.0
-            val mean = sumSquares / n / (32768.0 * 32768.0)
-            return max(-120.0, 10 * log10(mean))
-        }
     }
 }

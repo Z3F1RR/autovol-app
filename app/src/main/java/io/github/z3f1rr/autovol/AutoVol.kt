@@ -16,8 +16,10 @@ object AutoVol {
     lateinit var log: EventLog
         private set
 
+    val platform: AndroidPlatform by lazy { AndroidPlatform(app) }
+
     val engine: Engine by lazy {
-        Engine(AndroidPlatform(app), History(FileHistoryStore(app)))
+        Engine(platform, History(FileHistoryStore(app)))
     }
 
     private val _status = MutableStateFlow(Status())
