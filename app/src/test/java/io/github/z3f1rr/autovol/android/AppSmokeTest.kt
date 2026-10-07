@@ -10,7 +10,10 @@ import android.os.Build
 import android.os.Process
 import android.telephony.TelephonyManager
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.github.z3f1rr.autovol.AndroidPlatform
@@ -20,6 +23,7 @@ import io.github.z3f1rr.autovol.BootReceiver
 import io.github.z3f1rr.autovol.CallReceiver
 import io.github.z3f1rr.autovol.MicAccess
 import io.github.z3f1rr.autovol.Root
+import io.github.z3f1rr.autovol.Updater
 import io.github.z3f1rr.autovol.core.RepeatMode
 import io.github.z3f1rr.autovol.core.RepeatSettings
 import io.github.z3f1rr.autovol.ui.MainActivity
@@ -64,10 +68,36 @@ class AppSmokeTest {
     }
 
     @Test
-    fun mainScreenShowsAccessHintAtTop() {
+    fun mainScreenShowsAccessHintWithoutRootControls() {
         compose.onNodeWithText("AutoVol").assertExists()
-        compose.onNodeWithText("Нет полного доступа к микрофону").assertExists()
-        compose.onNodeWithText("Выдать через root").assertExists()
+        compose.onNodeWithText("Нет автозапуска после перезагрузки").assertExists()
+        // no root manager installed: nothing about root anywhere
+        compose.onNodeWithText("Настроить через root").assertDoesNotExist()
+        compose.onNodeWithText("Root", substring = true).assertDoesNotExist()
+        // calibration and system moved to "Ещё"
+        compose.onNodeWithText("Автокалибровка").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Ещё", substring = true).performClick()
+        compose.onNodeWithText("Автокалибровка").assertExists()
+        compose.onNodeWithText("Root").assertDoesNotExist()
+        compose.onNodeWithText("Журнал событий").performScrollTo().performClick()
+        compose.onNodeWithText("Поделиться").assertExists()
+    }
+
+    @Test
+    fun hintCanBeDismissedWithoutRoot() {
+        compose.onNodeWithText("Понятно").performClick()
+        compose.onNodeWithText("Нет автозапуска после перезагрузки").assertDoesNotExist()
+    }
+
+    @Test
+    fun githubReleaseIsParsed() {
+        val json = """{"tag_name":"v0.2.0","body":"Что нового","assets":[
+            {"name":"notes.txt","browser_download_url":"https://x/notes.txt","size":1},
+            {"name":"AutoVol-v0.2.0.apk","browser_download_url":"https://x/a.apk","size":2000000}]}"""
+        val r = Updater.parseRelease(json)!!
+        assertEquals("0.2.0", r.version)
+        assertEquals("https://x/a.apk", r.apkUrl)
+        assertNull(Updater.parseRelease("""{"tag_name":"v1","assets":[]}"""))
     }
 
     @Test
@@ -178,13 +208,9 @@ class AppSmokeTest {
 
     @Test
     fun withRootAllGrantsAreIssued() {
-        val dir = File(app.cacheDir, "fake-su").apply { mkdirs() }
-        val log = File(dir, "commands.txt")
-        val su = File(dir, "su")
-        su.writeText("#!/bin/sh\n[ \"\$2\" = id ] && echo 'uid=0(root) gid=0(root)'\necho \"\$2\" >> '${log.path}'\n")
-        su.setExecutable(true)
-        Root.su = su.path
-        Root.grantAll(app)
+        val log = fakeSu()
+        val r = Root.grantAll(app)
+        assertTrue(r.output, r.ok)
         val cmds = log.readLines()
         val uidCmd = "appops set --uid ${app.packageName} RECORD_AUDIO allow"
         assertTrue(cmds.toString(), uidCmd in cmds)
@@ -192,17 +218,49 @@ class AppSmokeTest {
         // every pm grant resets the mic op, so the appops must come after all of them
         assertTrue(cmds.toString(), cmds.indexOf(uidCmd) > cmds.indexOfLast { it.startsWith("pm grant") })
         assertTrue(AutoVol.prefs.rootGranted)
-        // not full yet (the fake su changes nothing): the log explains the uid/package modes
-        assertTrue(AutoVol.log.text(), AutoVol.log.text().contains("uid:"))
+        assertTrue(AutoVol.log.text(), AutoVol.log.text().contains("root: работает"))
+    }
+
+    /** Fake su: answers "id" as root and records every command. */
+    private fun fakeSu(): File {
+        val dir = File(app.cacheDir, "fake-su").apply { mkdirs() }
+        val log = File(dir, "commands.txt").apply { delete() }
+        val su = File(dir, "su")
+        su.writeText("#!/bin/sh\n[ \"\$2\" = id ] && echo 'uid=0(root) gid=0(root)'\necho \"\$2\" >> '${log.path}'\n")
+        su.setExecutable(true)
+        Root.su = su.path
+        return log
     }
 
     @Test
-    fun reapplyWithoutPriorRootDoesNothing() {
+    fun bootWithRootStartsServiceAsRoot() {
+        val log = fakeSu()
+        grantMic()
+        setMicOp(AppOpsManager.MODE_FOREGROUND)
+        AutoVol.prefs.enabled = true
+        AutoVol.prefs.rootGranted = true
+        BootReceiver().onReceive(app, Intent(Intent.ACTION_BOOT_COMPLETED))
+        val deadline = System.currentTimeMillis() + 10_000
+        while (!AutoVol.log.text().contains("запуск через root") && System.currentTimeMillis() < deadline) Thread.sleep(50)
+        val cmds = log.readText()
+        assertTrue(cmds, cmds.contains("am start-foreground-service -n ${app.packageName}/${app.packageName}.AutoVolService"))
+        assertTrue(cmds, cmds.contains("--ez from_ui true"))
+        // no "tap to resume" notification for root users
+        assertEquals(0, shadowOf(app.getSystemService(NotificationManager::class.java)).allNotifications.size)
+    }
+
+    @Test
+    fun bootWithRootRevokedFallsBackToNotification() {
         Root.su = "/nonexistent/su"
         grantMic()
         setMicOp(AppOpsManager.MODE_FOREGROUND)
-        Root.reapplyIfNeeded(app, force = true)
-        assertFalse(AutoVol.log.text().contains("root:"))
+        AutoVol.prefs.enabled = true
+        AutoVol.prefs.rootGranted = true
+        BootReceiver().onReceive(app, Intent(Intent.ACTION_BOOT_COMPLETED))
+        val nm = shadowOf(app.getSystemService(NotificationManager::class.java))
+        val deadline = System.currentTimeMillis() + 10_000
+        while (nm.allNotifications.isEmpty() && System.currentTimeMillis() < deadline) Thread.sleep(50)
+        assertEquals(1, nm.allNotifications.size)
     }
 
     @Test

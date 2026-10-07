@@ -12,6 +12,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,21 +32,27 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
-        )
         handleResume(intent)
         setContent {
             AutoVolTheme {
-                var showLog by rememberSaveable { mutableStateOf(false) }
-                BackHandler(enabled = showLog) { showLog = false }
-                if (showLog) {
-                    LogScreen(onBack = { showLog = false })
-                } else {
-                    MainScreen(
+                val dark = isAppInDarkTheme()
+                LaunchedEffect(dark) {
+                    val bars = if (dark) {
+                        SystemBarStyle.dark(Color.TRANSPARENT)
+                    } else {
+                        SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)
+                    }
+                    enableEdgeToEdge(statusBarStyle = bars, navigationBarStyle = bars)
+                }
+                // main → "Ещё" → log
+                var screen by rememberSaveable { mutableStateOf("main") }
+                BackHandler(enabled = screen != "main") { screen = if (screen == "log") "more" else "main" }
+                when (screen) {
+                    "log" -> LogScreen(onBack = { screen = "more" })
+                    "more" -> MoreScreen(onBack = { screen = "main" }, onOpenLog = { screen = "log" })
+                    else -> MainScreen(
                         onToggle = ::toggle,
-                        onOpenLog = { showLog = true },
+                        onOpenMore = { screen = "more" },
                         onRequestPhone = ::requestPhonePermissions,
                     )
                 }

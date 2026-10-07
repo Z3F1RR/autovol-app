@@ -54,19 +54,8 @@ class BootReceiver : BroadcastReceiver() {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
         if (!AutoVol.prefs.enabled) return
         val why = if (intent.action == Intent.ACTION_BOOT_COMPLETED) AutoVolService.REASON_BOOT else "обновление приложения"
-        if (AutoVol.prefs.rootGranted && MicAccess.level(context) != MicAccess.Level.FULL) {
-            // Root was used before and the grant is gone: re-apply it, then start (su must not block main).
-            val pending = goAsync()
-            Thread {
-                try {
-                    Root.reapplyIfNeeded(context, force = true)
-                    AutoVolService.startFromBackground(context, why)
-                } finally {
-                    pending.finish()
-                }
-            }.start()
-            return
-        }
-        AutoVolService.startFromBackground(context, why)
+        // su runs on a worker thread: keep the broadcast alive until it is done.
+        val pending: PendingResult? = goAsync()
+        AutoVolService.startFromBackground(context, why) { pending?.finish() }
     }
 }

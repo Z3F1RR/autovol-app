@@ -46,9 +46,15 @@ class AutoVolService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
-        if ((!foreground || fromUi) && !goForeground(fromUi, intent?.getStringExtra(EXTRA_REASON) ?: "перезапуск системой")) {
-            Notifications.showResume(this)
-            stopSelf()
+        val reason = intent?.getStringExtra(EXTRA_REASON) ?: "перезапуск системой"
+        if ((!foreground || fromUi) && !goForeground(fromUi, reason)) {
+            if (!fromUi && AutoVol.prefs.rootGranted) {
+                // Restarted by the system without mic access: let root start us properly.
+                startFromBackground(this, reason)
+            } else {
+                Notifications.showResume(this)
+            }
+            stopSelf(startId)
             return START_NOT_STICKY
         }
         instance = this
@@ -127,7 +133,6 @@ class AutoVolService : Service() {
 
     private fun runCycle() {
         CallReceiver.restoreIfStale(this)
-        Root.reapplyIfNeeded(this)
         val settings = AutoVol.prefs.settings()
         val engine = AutoVol.engine
         val r = try {
@@ -181,7 +186,7 @@ class AutoVolService : Service() {
 
     companion object {
         internal const val EXTRA_FROM_UI = "from_ui"
-        private const val EXTRA_REASON = "reason"
+        internal const val EXTRA_REASON = "reason"
         private const val WAKE_MS = 60_000L
         const val REASON_BOOT = "загрузка"
 
@@ -211,9 +216,38 @@ class AutoVolService : Service() {
             )
         }
 
-        /** Start after boot/update/process death. Falls back to a "tap to resume" notification. */
-        fun startFromBackground(ctx: Context, reason: String) {
-            if (MicAccess.level(ctx) != MicAccess.Level.FULL && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        /**
+         * Start after boot/update/process death. With root the start goes through uid 0 (microphone
+         * allowed); otherwise only in full appops mode. Falls back to a "tap to resume" notification.
+         * [done] runs when finished (to complete a goAsync broadcast).
+         */
+        fun startFromBackground(ctx: Context, reason: String, done: () -> Unit = {}) {
+            val full = MicAccess.level(ctx) == MicAccess.Level.FULL
+            if (!full && AutoVol.prefs.rootGranted) {
+                Thread {
+                    try {
+                        val r = Root.startService(ctx, reason)
+                        if (r.ok) {
+                            AutoVol.log.add("$reason: запуск через root")
+                        } else {
+                            AutoVol.log.add("$reason: запуск через root не удался (${r.output}) — ждём нажатия на уведомление")
+                            Notifications.showResume(ctx)
+                        }
+                    } finally {
+                        done()
+                    }
+                }.start()
+                return
+            }
+            try {
+                startWithoutRoot(ctx, reason, full)
+            } finally {
+                done()
+            }
+        }
+
+        private fun startWithoutRoot(ctx: Context, reason: String, full: Boolean) {
+            if (!full && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 AutoVol.log.add(
                     "$reason: базовый режим (RECORD_AUDIO=${MicAccess.rawMode(ctx)}) — ждём нажатия на уведомление",
                 )

@@ -32,7 +32,10 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
@@ -71,6 +74,7 @@ import io.github.z3f1rr.autovol.MicAccess
 import io.github.z3f1rr.autovol.Root
 import io.github.z3f1rr.autovol.Scheduler
 import io.github.z3f1rr.autovol.Status
+import io.github.z3f1rr.autovol.Updater
 import io.github.z3f1rr.autovol.core.RepeatMode
 import io.github.z3f1rr.autovol.core.Settings as EngineSettings
 import kotlinx.coroutines.Dispatchers
@@ -95,7 +99,11 @@ data class Live(
     val phoneState: Boolean = false,
     val callLog: Boolean = false,
     val rootManager: String? = null,
-)
+    val rootGranted: Boolean = false,
+) {
+    /** Starts by itself after reboot: background mic via appops, or service started by root. */
+    val autoStart: Boolean get() = mic == MicAccess.Level.FULL || rootGranted
+}
 
 fun readLive(ctx: Context): Live {
     val am = ctx.getSystemService(AudioManager::class.java)
@@ -113,13 +121,14 @@ fun readLive(ctx: Context): Live {
         phoneState = ctx.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED,
         callLog = ctx.checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED,
         rootManager = Root.managerName(ctx),
+        rootGranted = AutoVol.prefs.rootGranted,
     )
 }
 
 private fun hm(ms: Long) = SimpleDateFormat("HH:mm", Locale.ROOT).format(Date(ms))
 
 @Composable
-fun MainScreen(onToggle: (Boolean) -> Unit, onOpenLog: () -> Unit, onRequestPhone: (sameNumber: Boolean) -> Unit) {
+fun MainScreen(onToggle: (Boolean) -> Unit, onOpenMore: () -> Unit, onRequestPhone: (sameNumber: Boolean) -> Unit) {
     val ctx = LocalContext.current
     var live by remember { mutableStateOf(readLive(ctx)) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
@@ -131,7 +140,8 @@ fun MainScreen(onToggle: (Boolean) -> Unit, onOpenLog: () -> Unit, onRequestPhon
             }
         }
     }
-    MainContent(live, onToggle, onOpenLog, onRequestPhone, refresh = { live = readLive(ctx) })
+    LaunchedEffect(Unit) { Updater.autoCheck(ctx) }
+    MainContent(live, onToggle, onOpenMore, onRequestPhone, refresh = { live = readLive(ctx) })
 }
 
 /** Stateless body, also rendered by the screenshot tests. */
@@ -139,7 +149,7 @@ fun MainScreen(onToggle: (Boolean) -> Unit, onOpenLog: () -> Unit, onRequestPhon
 fun MainContent(
     live: Live,
     onToggle: (Boolean) -> Unit,
-    onOpenLog: () -> Unit,
+    onOpenMore: () -> Unit,
     onRequestPhone: (sameNumber: Boolean) -> Unit,
     refresh: () -> Unit = {},
 ) {
@@ -147,34 +157,47 @@ fun MainContent(
     val running by AutoVol.serviceRunning.collectAsStateWithLifecycle()
     val status by AutoVol.status.collectAsStateWithLifecycle()
     val pauseUntil by AutoVol.prefs.pauseUntilFlow.collectAsStateWithLifecycle()
+    val bannerDismissed by AutoVol.prefs.accessHintDismissed.flow.collectAsStateWithLifecycle()
+    val update by Updater.state.collectAsStateWithLifecycle()
 
     Column(
         Modifier
             .fillMaxSize()
-            .background(Oos.Black)
+            .background(Oos.Background)
             .verticalScroll(rememberScrollState())
             .statusBarsPadding()
             .navigationBarsPadding()
             .padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Header(enabled, running, status, onOpenLog)
-        if (live.mic != MicAccess.Level.FULL) AccessBanner(live, refresh)
+        Header(enabled, running, status, onOpenMore)
+        // Root users always see the hint until it is fixed; others can dismiss it (nothing to do without a PC).
+        if (!live.autoStart && (live.rootManager != null || !bannerDismissed)) AccessBanner(live, refresh)
+        (update as? Updater.State.Available)?.let { UpdateBanner(it.release, onOpenMore) }
         HeroCard(enabled, running, status, live, pauseUntil, onToggle)
         SectionLabel("Громкость")
         VolumeSection(live)
         SectionLabel("Звонки")
         RepeatCallSection(live, onRequestPhone)
-        SectionLabel("Калибровка")
-        CalibrationSection(status)
-        SectionLabel("Система")
-        SystemSection(live, refresh)
         Spacer(Modifier.height(24.dp))
     }
 }
 
 @Composable
-private fun Header(enabled: Boolean, running: Boolean, st: Status, onOpenLog: () -> Unit) {
+private fun UpdateBanner(rel: Updater.Release, onOpenMore: () -> Unit) {
+    OosCard(color = MaterialTheme.colorScheme.primaryContainer) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Доступна версия ${rel.version}", style = MaterialTheme.typography.titleMedium)
+                Text("Обновление в разделе «Ещё»", color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
+            }
+            FilledTonalButton(onClick = onOpenMore) { Text("Открыть") }
+        }
+    }
+}
+
+@Composable
+private fun Header(enabled: Boolean, running: Boolean, st: Status, onOpenMore: () -> Unit) {
     Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
         Column(Modifier.weight(1f)) {
             Text("AutoVol", style = MaterialTheme.typography.headlineLarge)
@@ -189,32 +212,16 @@ private fun Header(enabled: Boolean, running: Boolean, st: Status, onOpenLog: ()
                 style = MaterialTheme.typography.bodyMedium,
             )
         }
-        TextButton(onClick = onOpenLog) { Text("Журнал") }
+        IconButton(onClick = onOpenMore) {
+            Icon(Icons.Filled.Settings, contentDescription = "Ещё: калибровка, система, обновления, журнал")
+        }
     }
 }
 
-@Composable
-fun SectionLabel(text: String) {
-    Text(
-        text.uppercase(),
-        color = Oos.TextSecondary,
-        style = MaterialTheme.typography.labelMedium,
-        modifier = Modifier.padding(start = 12.dp, top = 8.dp),
-    )
-}
-
-@Composable
-fun OosCard(modifier: Modifier = Modifier, color: Color = Oos.Card, content: @Composable () -> Unit) {
-    Box(
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(24.dp))
-            .background(color)
-            .padding(horizontal = 18.dp, vertical = 16.dp),
-    ) { content() }
-}
-
-/** Top-of-screen check: background microphone access, with root and adb ways to fix it. */
+/**
+ * Top-of-screen check while AutoVol cannot start by itself after reboot. Root controls appear only
+ * when a root manager is installed; others get the adb hint and can dismiss it.
+ */
 @Composable
 private fun AccessBanner(live: Live, refresh: () -> Unit) {
     val ctx = LocalContext.current
@@ -222,46 +229,55 @@ private fun AccessBanner(live: Live, refresh: () -> Unit) {
     var busy by remember { mutableStateOf(false) }
     var result by remember { mutableStateOf<String?>(null) }
     var showAdb by remember { mutableStateOf(false) }
+    val root = live.rootManager
     OosCard(color = Oos.WarningBg) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Нет полного доступа к микрофону", style = MaterialTheme.typography.titleMedium, color = Oos.Warning)
+            Text("Нет автозапуска после перезагрузки", style = MaterialTheme.typography.titleMedium, color = Oos.Warning)
             Text(
-                when (live.mic) {
-                    MicAccess.Level.NONE -> "Нет разрешения на микрофон. Root выдаст всё сразу, или включите автогромкость."
-                    else -> "Базовый режим: после перезагрузки придётся открывать приложение. " +
-                        "С полным доступом всё запускается само."
+                if (live.mic == MicAccess.Level.NONE) {
+                    "Нет разрешения на микрофон — включите автогромкость, чтобы его выдать."
+                } else {
+                    "Сейчас всё работает, но после перезагрузки AutoVol придётся запускать касанием уведомления."
                 },
                 color = Oos.TextPrimary,
                 style = MaterialTheme.typography.bodyMedium,
             )
-            Text(
-                if (live.rootManager != null) {
-                    "Обнаружен ${live.rootManager}. Разрешите AutoVol в ${live.rootManager} → Суперпользователь, затем нажмите кнопку."
-                } else {
-                    "Root-менеджер не найден. Если root есть — кнопка всё равно попробует su; иначе выдайте через adb."
-                },
-                color = Oos.TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
+            if (root != null) {
+                Text(
+                    "Обнаружен $root. Разрешите AutoVol в $root → Суперпользователь, затем нажмите кнопку.",
+                    color = Oos.TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(enabled = !busy, onClick = {
-                    busy = true
-                    result = null
-                    scope.launch {
-                        val r = withContext(Dispatchers.IO) { Root.grantAll(ctx) }
-                        busy = false
-                        result = r.output
-                        refresh()
-                    }
-                }) { Text("Выдать через root") }
+                if (root != null) {
+                    Button(enabled = !busy, onClick = {
+                        busy = true
+                        result = null
+                        scope.launch {
+                            val r = withContext(Dispatchers.IO) { Root.grantAll(ctx) }
+                            busy = false
+                            result = r.output
+                            refresh()
+                        }
+                    }) { Text("Настроить через root") }
+                }
                 TextButton(onClick = { showAdb = !showAdb }) { Text(if (showAdb) "Скрыть adb" else "Через adb") }
+                if (root == null) {
+                    TextButton(onClick = { AutoVol.prefs.accessHintDismissed.value = true }) { Text("Понятно") }
+                }
                 if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
             result?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Oos.TextPrimary) }
             if (showAdb) {
                 val cmd = MicAccess.adbCommand(ctx)
+                Text(
+                    "С компьютера (Android 11+ может сбрасывать это после перезагрузки):",
+                    color = Oos.TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                )
                 SelectionContainer { Text(cmd, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Oos.TextPrimary) }
-                FilledTonalButton(onClick = { copy(ctx, cmd) }) { Text("Копировать") }
+                FilledTonalButton(onClick = { copyToClipboard(ctx, cmd) }) { Text("Копировать") }
             }
         }
     }
@@ -361,24 +377,6 @@ private fun VolumeChip(label: String, v: Int, max: Int, modifier: Modifier) {
 }
 
 /** Long integer sliders: hide the tick dots, the value is shown as text. */
-@Composable
-private fun noTicks() = SliderDefaults.colors(activeTickColor = Color.Transparent, inactiveTickColor = Color.Transparent)
-
-@Composable
-private fun RowDivider() = HorizontalDivider(color = Oos.Divider, modifier = Modifier.padding(vertical = 12.dp))
-
-@Composable
-private fun SwitchRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(subtitle, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
-        }
-        Switch(checked = checked, onCheckedChange = onChange)
-    }
-}
-
-/** -3..+3 sensitivity slider; [onDone] stores the value. */
 @Composable
 private fun SensitivitySlider(title: String, subtitle: String, value: Int, enabled: Boolean = true, onDone: (Int) -> Unit) {
     var v by remember(value) { mutableFloatStateOf(value.toFloat()) }
@@ -530,120 +528,4 @@ private fun RepeatCallSection(live: Live, onRequestPhone: (sameNumber: Boolean) 
     }
 }
 
-@Composable
-private fun CalibrationSection(st: Status) {
-    var confirmReset by remember { mutableStateOf(false) }
-    OosCard {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            val pct = (st.calWeight * 100).toInt()
-            Row {
-                Text("Автокалибровка", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Text(if (pct >= 100) "готова" else "$pct%", color = MaterialTheme.colorScheme.primary)
-            }
-            LinearProgressIndicator(
-                progress = { st.calWeight.toFloat().coerceIn(0f, 1f) },
-                modifier = Modifier.fillMaxWidth(),
-                trackColor = Oos.CardHigh,
-            )
-            Text(
-                buildString {
-                    append("Идёт постоянно по последним 7 дням: пороги подстраиваются под новые места и звуки. ")
-                    append("Замеров: ${st.samples}.")
-                    if (st.calFloor != null) append(" Тишина ${st.calFloor} дБА, максимум от ${st.calTop} дБА.")
-                },
-                color = Oos.TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            TextButton(onClick = { confirmReset = true }) { Text("Сбросить калибровку") }
-        }
-    }
-    if (confirmReset) {
-        AlertDialog(
-            onDismissRequest = { confirmReset = false },
-            containerColor = Oos.CardHigh,
-            title = { Text("Сбросить калибровку?") },
-            text = { Text("История замеров будет удалена, пороги начнут подстраиваться заново.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmReset = false
-                    AutoVol.engine.history.clear()
-                    AutoVol.log.add("калибровка сброшена")
-                    AutoVol.publish(AutoVol.status.value.copy(samples = 0, calFloor = null, calTop = null, calWeight = 0.0))
-                }) { Text("Сбросить") }
-            },
-            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Отмена") } },
-        )
-    }
-}
 
-@Composable
-private fun StatusRow(title: String, ok: Boolean, okText: String, badText: String, action: String?, onAction: () -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(8.dp).clip(CircleShape).background(if (ok) Oos.Ok else Oos.Warning))
-        Spacer(Modifier.width(12.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
-            Text(if (ok) okText else badText, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
-        }
-        if (!ok && action != null) TextButton(onClick = onAction) { Text(action) }
-    }
-}
-
-@Composable
-private fun SystemSection(live: Live, refresh: () -> Unit) {
-    val ctx = LocalContext.current
-    OosCard {
-        Column {
-            StatusRow(
-                "Фоновый микрофон",
-                live.mic == MicAccess.Level.FULL,
-                "Полный доступ — запуск после перезагрузки сам",
-                if (live.mic == MicAccess.Level.NONE) "Нет разрешения" else "Базовый режим — см. подсказку вверху",
-                null,
-            ) {}
-            RowDivider()
-            StatusRow(
-                "Точные будильники",
-                live.exactAlarms,
-                "Разрешены — проверки идут вовремя",
-                "Не разрешены — проверки с опозданием",
-                "Разрешить",
-            ) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    ctx.startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, Uri.parse("package:${ctx.packageName}")))
-                }
-            }
-            RowDivider()
-            StatusRow(
-                "Батарея",
-                live.batteryUnrestricted,
-                "Без ограничений",
-                "Оптимизация включена — система может усыплять сервис",
-                "Отключить",
-            ) { requestBatteryUnrestricted(ctx) }
-            RowDivider()
-            StatusRow(
-                "Root",
-                AutoVol.prefs.rootGranted,
-                "Использован — права восстанавливаются после перезагрузки",
-                live.rootManager?.let { "Найден $it, не использован" } ?: "Не найден (не обязателен)",
-                null,
-            ) {}
-        }
-    }
-    LaunchedEffect(Unit) { refresh() }
-}
-
-private fun copy(ctx: Context, text: String) {
-    ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("adb", text))
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) Toast.makeText(ctx, "Скопировано", Toast.LENGTH_SHORT).show()
-}
-
-@SuppressLint("BatteryLife")
-private fun requestBatteryUnrestricted(ctx: Context) {
-    try {
-        ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${ctx.packageName}")))
-    } catch (e: android.content.ActivityNotFoundException) {
-        ctx.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
-    }
-}

@@ -20,6 +20,7 @@ import io.github.z3f1rr.autovol.core.RepeatSettings
 import io.github.z3f1rr.autovol.ui.AutoVolTheme
 import io.github.z3f1rr.autovol.ui.Live
 import io.github.z3f1rr.autovol.ui.MainContent
+import io.github.z3f1rr.autovol.ui.MoreContent
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -53,7 +54,7 @@ class ScreenshotTest {
             mic = MicAccess.Level.BASIC, exactAlarms = true, batteryUnrestricted = false,
             phoneState = true, callLog = true, rootManager = "KernelSU")
         compose.setContent { AutoVolTheme { MainContent(live, {}, {}, {}) } }
-        compose.onRoot().captureRoboImage(out("main_basic_root"))
+        compose.onRoot().captureRoboImage(out("main_dark_root"))
     }
 
     @Test
@@ -67,10 +68,23 @@ class ScreenshotTest {
                 calFloor = -66.0, calTop = -40.0,
             ),
         )
+        AutoVol.prefs.themeMode.value = "LIGHT"
         val live = Live(ring = 12, ringMax = 15, notif = 12, notifMax = 15, media = 22, mediaMax = 30,
-            mic = MicAccess.Level.FULL, exactAlarms = true, batteryUnrestricted = true, phoneState = true, callLog = true)
+            mic = MicAccess.Level.BASIC, exactAlarms = true, batteryUnrestricted = true, phoneState = true, callLog = true)
         compose.setContent { AutoVolTheme { MainContent(live, {}, {}, {}) } }
-        compose.onRoot().captureRoboImage(out("main_full"))
+        compose.onRoot().captureRoboImage(out("main_light_noroot"))
+    }
+
+    @Test
+    fun moreScreenDark() {
+        AutoVol.prefs.themeMode.value = "DARK"
+        AutoVol.prefs.pureBlack.value = false
+        AutoVol.prefs.rootGranted = true
+        AutoVol.publish(Status(timeMs = 1_760_000_000_000, samples = 140, calWeight = 0.47, calFloor = -70.1, calTop = -46.1))
+        val live = Live(mic = MicAccess.Level.BASIC, exactAlarms = false, batteryUnrestricted = true,
+            rootManager = "KernelSU Next", rootGranted = true)
+        compose.setContent { AutoVolTheme { MoreContent(live, {}, {}) } }
+        compose.onRoot().captureRoboImage(out("more_dark"))
     }
 
     @Test
@@ -103,7 +117,7 @@ class ScreenshotTest {
         c.clipPath(shapes[1])
         c.drawColor(Color.BLACK)
         val mono = ContextCompat.getDrawable(ctx, R.drawable.ic_launcher_monochrome)!!
-        mono.setTint(Color.rgb(170, 200, 255))
+        mono.setTint(Color.rgb(170, 200, 255)) // themed icons get a tint
         mono.setBounds(-size / 4, -size / 4, size + size / 4, size + size / 4)
         mono.draw(c)
         c.restore()

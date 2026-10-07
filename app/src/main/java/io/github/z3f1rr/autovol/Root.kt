@@ -50,10 +50,6 @@ object Root {
         "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su",
     )
 
-    /** Last attempt to re-apply the grant from a cycle; limits su calls. */
-    @Volatile
-    private var lastReapplyMs = 0L
-
     fun run(cmd: String, timeoutSec: Long = 15): Result {
         su?.let { return exec(it, cmd, timeoutSec) }
         resolved?.let { return exec(it, cmd, timeoutSec) }
@@ -118,8 +114,10 @@ object Root {
     }
 
     /**
-     * Checks su and grants full access. Returns a human-readable outcome for the UI and the log;
-     * the grant is remembered so it can be re-applied after reboot.
+     * Checks su and sets everything up. Background microphone itself does not rely on appops (the
+     * permission service resets RECORD_AUDIO to "foreground" right away on Android 11+): with root the
+     * service is started by uid 0 ([startService]), which Android treats as a system start and lets a
+     * microphone foreground service record in the background.
      */
     fun grantAll(ctx: Context): Result {
         // Magisk asks the user on the first call: give them time to answer.
@@ -139,36 +137,28 @@ object Root {
             if (r.ok) null else "$cmd: ${r.output.take(80)}"
         }
         AutoVol.prefs.rootGranted = true
-        return report(ctx, "выдан", failed)
+        val pkg = ctx.packageName
+        val uidMode = run("appops get --uid $pkg RECORD_AUDIO").output.replace('\n', ' ').take(120)
+        AutoVol.log.add(
+            "root: работает (${managerName(ctx) ?: "su"}); appops: $uidMode" +
+                if (failed.isNotEmpty()) "; ошибки: ${failed.joinToString("; ")}" else "",
+        )
+        return Result(true, "Root работает: после перезагрузки AutoVol запустится сам.")
     }
 
     /**
-     * The permission service puts RECORD_AUDIO back to "foreground" after reboot and after any
-     * permission change. With root, quietly restore it (at most every 10 minutes). Worker thread only.
+     * Starts the service as uid 0. ActivityManager treats root/shell callers like the system, so the
+     * microphone foreground service gets "while-in-use" access although the app is in the background.
+     * Blocking: call from a worker thread.
      */
-    fun reapplyIfNeeded(ctx: Context, force: Boolean = false) {
-        if (!AutoVol.prefs.rootGranted || MicAccess.level(ctx) == MicAccess.Level.FULL) return
-        val now = System.currentTimeMillis()
-        if (!force && now - lastReapplyMs < 10 * 60_000L) return
-        lastReapplyMs = now
-        val failed = micCommands(ctx).mapNotNull { cmd ->
-            val r = run(cmd)
-            if (r.ok) null else "$cmd: ${r.output.take(80)}"
-        }
-        report(ctx, "восстановлен (система сбросила режим)", failed)
-    }
-
-    private fun report(ctx: Context, what: String, failed: List<String>): Result {
-        val full = MicAccess.level(ctx) == MicAccess.Level.FULL
-        val msg = if (full) {
-            "Полный доступ $what через root."
-        } else {
-            val pkg = ctx.packageName
-            val uidMode = run("appops get --uid $pkg RECORD_AUDIO").output.take(120)
-            val pkgMode = run("appops get $pkg RECORD_AUDIO").output.take(120)
-            "Root есть, но доступ: ${MicAccess.rawMode(ctx)} (uid: $uidMode; пакет: $pkgMode)"
-        }
-        AutoVol.log.add("root: $msg" + if (failed.isNotEmpty()) " Ошибки: ${failed.joinToString("; ")}" else "")
-        return Result(full, msg)
+    fun startService(ctx: Context, reason: String): Result {
+        val pkg = ctx.packageName
+        val safeReason = reason.replace("'", "")
+        val r = run(
+            "am start-foreground-service -n $pkg/$pkg.AutoVolService" +
+                " --ez ${AutoVolService.EXTRA_FROM_UI} true --es ${AutoVolService.EXTRA_REASON} '$safeReason (root)'",
+        )
+        val ok = r.ok && !r.output.contains("Error", ignoreCase = true) && !r.output.contains("Exception")
+        return Result(ok, r.output.take(160))
     }
 }

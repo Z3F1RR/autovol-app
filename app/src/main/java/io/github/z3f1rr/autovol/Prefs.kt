@@ -74,6 +74,42 @@ class Prefs(context: Context) {
             _mediaSens.value = v
         }
 
+    private fun <T> stored(read: () -> T, write: (SharedPreferences.Editor, T) -> Unit) = StoredFlow(read(), write)
+
+    inner class StoredFlow<T>(initial: T, private val write: (SharedPreferences.Editor, T) -> Unit) {
+        private val state = MutableStateFlow(initial)
+        val flow: StateFlow<T> = state.asStateFlow()
+        var value: T
+            get() = state.value
+            set(v) {
+                sp.edit().also { write(it, v) }.apply()
+                state.value = v
+            }
+    }
+
+    /** Appearance: "SYSTEM" / "LIGHT" / "DARK". */
+    val themeMode = stored({ sp.getString("theme_mode", "SYSTEM") ?: "SYSTEM" }) { e, v -> e.putString("theme_mode", v) }
+
+    /** Pure black background in the dark theme (AMOLED, OxygenOS look). */
+    val pureBlack = stored({ sp.getBoolean("pure_black", true) }) { e, v -> e.putBoolean("pure_black", v) }
+
+    /** Accent: "SYSTEM" (device accent setting) / "WALLPAPER" (Material You). */
+    val accentSource = stored({ sp.getString("accent", "SYSTEM") ?: "SYSTEM" }) { e, v -> e.putString("accent", v) }
+
+    /** The user dismissed the "no autostart" hint (no root, nothing to do without a PC). */
+    val accessHintDismissed = stored({ sp.getBoolean("access_hint_dismissed", false) }) { e, v ->
+        e.putBoolean("access_hint_dismissed", v)
+    }
+
+    /** Check GitHub Releases for a new version when the app is opened (at most daily). */
+    val updateAutoCheck = stored({ sp.getBoolean("update_auto", true) }) { e, v -> e.putBoolean("update_auto", v) }
+
+    var lastUpdateCheckMs: Long
+        get() = sp.getLong("update_last", 0)
+        set(v) {
+            sp.edit().putLong("update_last", v).apply()
+        }
+
     var pauseUntilMs: Long
         get() = _pauseUntil.value
         set(v) {
