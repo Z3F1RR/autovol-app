@@ -40,9 +40,13 @@ data class Settings(
     val mediaEnabled: Boolean = false,
     /** Media sensitivity, -3..+3 steps relative to the ringer step. */
     val mediaSens: Int = 0,
+    /** Learn from manual ringer changes ([Learning]). */
+    val learnFromManual: Boolean = true,
 ) {
     companion object {
         const val SENS_MAX = 3
         const val SENS_DB_PER_NOTCH = 3.0
+        const val LEARN_STEP_DB = 1.5
+        const val LEARN_MAX_DB = 9.0
     }
 }

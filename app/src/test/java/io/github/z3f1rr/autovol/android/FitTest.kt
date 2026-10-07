@@ -20,13 +20,13 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 
 /**
- * The main screen must fit a common phone (393x851 dp, smaller than OnePlus 15) without scrolling,
- * even in the busiest state: root hint, media and repeat-call options open. 60 dp are reserved for the
- * status and navigation bars.
+ * The main screen must fit a common phone (393x851 dp minus 60 dp of system bars = 393x791,
+ * smaller than OnePlus 15) without scrolling, even in the busiest state: root hint, media and
+ * repeat-call options open. On taller screens the hero card takes the spare height.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [36], qualifiers = "w393dp-h851dp-xxhdpi")
+@Config(sdk = [36], qualifiers = "w393dp-h791dp-xxhdpi")
 class FitTest {
     @get:Rule
     val compose = createComposeRule()
@@ -54,12 +54,41 @@ class FitTest {
             mic = MicAccess.Level.BASIC, phoneState = true, callLog = true, rootManager = "KernelSU Next")
         compose.setContent { AutoVolTheme { MainContent(live, {}, {}, {}) } }
         compose.onRoot().captureRoboImage(
-            System.getProperty("roborazzi.outputDir", "build/outputs/roborazzi") + "/main_fit_393x851_$lang.png",
+            System.getProperty("roborazzi.outputDir", "build/outputs/roborazzi") + "/main_fit_393x791_$lang.png",
         )
         val density = compose.onRoot().fetchSemanticsNode().layoutInfo.density.density
         // unclipped position of the last row (the repeat-call window slider)
         val node = compose.onNodeWithText(lastLabel).fetchSemanticsNode()
         val bottomDp = (node.positionInRoot.y + node.size.height) / density + 12 // + card padding
-        assertTrue("content ends at $bottomDp dp", bottomDp <= 851 - 60)
+        assertTrue("content ends at $bottomDp dp", bottomDp <= 791)
+    }
+
+    /** Tall phone (≈ OnePlus 15), little content: the hero grows so no big empty band is left. */
+    @Test
+    @Config(qualifiers = "ru-w448dp-h995dp-xxhdpi")
+    fun tallScreenIsFilled() {
+        AutoVol.prefs.enabled = true
+        AutoVol.setServiceRunning(true)
+        AutoVol.prefs.mediaEnabled = false
+        AutoVol.prefs.repeat = RepeatSettings(enabled = false)
+        // six hours of history for the chart: quiet with a noisy hour in the middle
+        val now = System.currentTimeMillis()
+        for (i in 0 until 72) {
+            val db = -66.0 + 4 * kotlin.math.sin(i / 5.0) + if (i in 30..42) 22.0 else 0.0
+            AutoVol.engine.history.add(db, now - (72 - i) * 300_000L, 7)
+        }
+        AutoVol.engine.state.levels = io.github.z3f1rr.autovol.core.Levels.parse(io.github.z3f1rr.autovol.core.Levels.DEFAULT)
+        AutoVol.publish(Status(timeMs = now, outcome = "APPLIED", lastDb = -58.0, step = 1, steps = 4, pct = 25))
+        val live = Live(ring = 5, ringMax = 16, notif = 5, notifMax = 16, media = 100, mediaMax = 160,
+            mic = MicAccess.Level.FULL, phoneState = true, callLog = true)
+        compose.setContent { AutoVolTheme { MainContent(live, {}, {}, {}) } }
+        compose.onRoot().captureRoboImage(
+            System.getProperty("roborazzi.outputDir", "build/outputs/roborazzi") + "/main_tall_448x995_ru.png",
+        )
+        val density = compose.onRoot().fetchSemanticsNode().layoutInfo.density.density
+        val node = compose.onNodeWithText("Повторный звонок на максимум").fetchSemanticsNode()
+        val bottomDp = (node.positionInRoot.y + node.size.height) / density
+        // the last card ends close to the bottom (only its padding + the bottom gap remain)
+        assertTrue("content ends at $bottomDp dp of 995", bottomDp > 995 - 70 && bottomDp <= 995)
     }
 }

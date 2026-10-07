@@ -19,6 +19,9 @@ class EngineState {
 
     /** Media volume we set last; null = not ours (muted/maximum by the user, or never set). Survives pauses. */
     var mediaLastSet: Int? = null
+
+    /** Correction learned from manual ringer changes, dB; positive = louder ([Learning]). */
+    var learnedBiasDb: Double = 0.0
     var mediaOverrideUntilMs: Long = 0
 
     fun resync() {
@@ -65,9 +68,11 @@ class Engine(
     val history: History,
     val state: EngineState = EngineState(),
     private val streams: List<Stream> = listOf(Stream.RING, Stream.NOTIFICATION),
+    private val biasStore: BiasStore = MemoryBiasStore(),
 ) {
     init {
         if (state.lastChangeMs == 0L) state.lastChangeMs = p.nowMs()
+        state.learnedBiasDb = biasStore.load()
     }
 
     fun cycle(s: Settings): CycleResult {
@@ -114,6 +119,7 @@ class Engine(
             st.resync()
         }
         if (st.lastSet.isNotEmpty() && streams.any { cur[it]!!.cur != (st.lastSet[it] ?: cur[it]!!.cur) }) {
+            if (s.learnFromManual) learnFromManual(cur)
             st.resync()
             st.overrideUntilMs = now + s.overrideMin * 60_000L
             return skip(idle, "громкость изменена вручную — пауза ${s.overrideMin} мин", Reason.MANUAL, hhmm(st.overrideUntilMs))
@@ -141,7 +147,10 @@ class Engine(
         if (db0 == null) return skip(fast, why!!.first, why.second)
         var db: Double = db0
         val (calibrated, cal) = Levels.autoLevels(history.values(), s.levels, s)
-        val lv = Levels.withSensitivity(calibrated, s.ringSens)
+        val lv = Levels.louderBy(
+            calibrated,
+            s.ringSens.coerceIn(-Settings.SENS_MAX, Settings.SENS_MAX) * Settings.SENS_DB_PER_NOTCH + st.learnedBiasDb,
+        )
         st.cal = cal
         st.levels = lv
         var up = Levels.stepOf(db, lv)
@@ -230,6 +239,28 @@ class Engine(
         return CycleResult(wait, note, Outcome.APPLIED)
     }
 
+    /** Direction of the user's correction (ringer first, else any stream) → learned bias. */
+    private fun learnFromManual(cur: Map<Stream, Volume?>) {
+        val changed = streams.firstOrNull { cur[it]!!.cur != (state.lastSet[it] ?: cur[it]!!.cur) } ?: return
+        val now = cur[changed]!!.cur
+        val was = state.lastSet[changed] ?: return
+        if (now == 0) return // to silent/vibrate: a mode change, not a level preference
+        val dir = if (now > was) 1 else -1
+        val before = state.learnedBiasDb
+        state.learnedBiasDb = Learning.next(before, dir)
+        if (state.learnedBiasDb != before) biasStore.save(state.learnedBiasDb)
+        p.log(
+            "ручное изменение ${streamName(changed)} $was→$now: учтено (" +
+                (if (dir > 0) "громче" else "тише") + "), поправка ${signed(state.learnedBiasDb)} дБ",
+        )
+    }
+
+    /** Forget the learned correction. */
+    fun resetLearning() {
+        state.learnedBiasDb = 0.0
+        biasStore.save(0.0)
+    }
+
     /** The user moved the media slider since we set it: leave media alone for OVERRIDE_MIN. */
     private fun checkMediaOverride(s: Settings, now: Long) {
         val set = state.mediaLastSet ?: return
@@ -268,6 +299,8 @@ class Engine(
             !cal.complete -> " [калибровка ${(cal.weight * 100).toInt()}%]"
             else -> ""
         }
+
+        fun signed(x: Double): String = (if (x > 0) "+" else "") + f1(x)
 
         fun f1(x: Double): String = String.format(Locale.ROOT, "%.1f", x)
 

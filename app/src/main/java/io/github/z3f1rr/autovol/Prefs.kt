@@ -101,6 +101,12 @@ class Prefs(context: Context) {
     /** Manually chosen accent, ARGB. */
     val accentColor = stored({ sp.getInt("accent_color", 0xFF3D8BFF.toInt()) }) { e, v -> e.putInt("accent_color", v) }
 
+    /** Learn from manual ringer changes. */
+    val learnFromManual = stored({ sp.getBoolean("learn_manual", true) }) { e, v -> e.putBoolean("learn_manual", v) }
+
+    /** Correction learned from manual changes, dB (observable for the UI, stored by the engine). */
+    val learnedBias = stored({ sp.getFloat("learned_bias", 0f).toDouble() }) { e, v -> e.putFloat("learned_bias", v.toFloat()) }
+
     /** The user dismissed the "no autostart" hint (no root, nothing to do without a PC). */
     val accessHintDismissed = stored({ sp.getBoolean("access_hint_dismissed", false) }) { e, v ->
         e.putBoolean("access_hint_dismissed", v)
@@ -191,6 +197,7 @@ class Prefs(context: Context) {
         ringSens = ringSens,
         mediaEnabled = mediaEnabled,
         mediaSens = mediaSens,
+        learnFromManual = learnFromManual.value,
     )
 
     fun loadStatus(): Status = Status.fromJson(sp.getString("status", null))

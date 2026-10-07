@@ -13,7 +13,8 @@ notification volume: minimum in a quiet room, step by step up to maximum in a no
 - If you change the volume yourself, AutoVol leaves it alone for 30 minutes.
 - Noise is measured in dBA, so barely audible rumble does not count. Thresholds calibrate
   themselves continuously over the last 7 days.
-- Separate sensitivity for ring/notifications and for media.
+- Separate sensitivity for ring/notifications and for media. If you often turn the ringer up or
+  down yourself, AutoVol learns from it (up to ±9 dB; can be turned off and reset).
 - Optional: media volume follows the noise too (muted media and media you turned all the way up are
   left alone).
 - Optional: if someone calls again after a missed call (same number or any number), the phone rings
@@ -55,4 +56,4 @@ logic, plus the Android layer on Android 10/12/14/16 via Robolectric and screens
 
 ## Screenshots
 
-<img src="docs/screenshots/main_fit_393x851_en.png" width="260"> <img src="docs/screenshots/more_dark_en.png" width="260">
+<img src="docs/screenshots/main_fit_393x791_en.png" width="260"> <img src="docs/screenshots/more_dark_en.png" width="260">

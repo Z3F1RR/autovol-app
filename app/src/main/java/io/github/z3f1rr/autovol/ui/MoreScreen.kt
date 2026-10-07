@@ -5,6 +5,14 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.background
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.material3.Slider
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.layout.width
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
@@ -56,6 +64,7 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.res.stringResource
 import io.github.z3f1rr.autovol.AutoVol
+import io.github.z3f1rr.autovol.AutoVolService
 import io.github.z3f1rr.autovol.R
 import io.github.z3f1rr.autovol.MicAccess
 import io.github.z3f1rr.autovol.Root
@@ -88,7 +97,7 @@ fun MoreContent(live: Live, onBack: () -> Unit, onOpenLog: () -> Unit, refresh: 
     ) {
         Row(Modifier.padding(top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.btn_back)) }
-            Text(stringResource(R.string.more_title), style = MaterialTheme.typography.headlineLarge)
+            Text(stringResource(R.string.more_title), style = MaterialTheme.typography.headlineMedium)
         }
         SectionLabel(stringResource(R.string.sec_appearance))
         AppearanceSection()
@@ -113,7 +122,7 @@ private fun AppearanceSection() {
     val custom by prefs.accentColor.flow.collectAsStateWithLifecycle()
     OosCard {
         Column {
-            Text(stringResource(R.string.theme), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.theme), style = MaterialTheme.typography.bodyLarge)
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                 listOf(
                     "SYSTEM" to stringResource(R.string.theme_system),
@@ -133,7 +142,7 @@ private fun AppearanceSection() {
                 SwitchRow(stringResource(R.string.black_bg), stringResource(R.string.black_bg_sub), black) { prefs.pureBlack.value = it }
             }
             RowDivider()
-            Text(stringResource(R.string.accent), style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.accent), style = MaterialTheme.typography.bodyLarge)
             SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                 SegmentedButton(
                     selected = accent == "SYSTEM",
@@ -167,9 +176,61 @@ private fun AppearanceSection() {
                         }
                     }
                 }
+                Spacer(Modifier.height(12.dp))
+                ColorEditor(custom) { prefs.accentColor.value = it }
             }
         }
     }
+}
+
+/** Any accent colour: hex code or hue / saturation / brightness sliders, kept in sync. */
+@Composable
+private fun ColorEditor(argb: Int, onChange: (Int) -> Unit) {
+    val hsv = remember(argb) { FloatArray(3).also { android.graphics.Color.colorToHSV(argb, it) } }
+    var h by remember(argb) { mutableFloatStateOf(hsv[0]) }
+    var s by remember(argb) { mutableFloatStateOf(hsv[1]) }
+    var v by remember(argb) { mutableFloatStateOf(hsv[2]) }
+    val current = android.graphics.Color.HSVToColor(floatArrayOf(h, s, v))
+    var hex by remember(argb) { mutableStateOf(toHex(argb)) }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(40.dp).clip(CircleShape).background(Color(current)))
+            Spacer(Modifier.width(12.dp))
+            OutlinedTextField(
+                value = hex,
+                onValueChange = { input ->
+                    hex = input.uppercase().filter { it.isDigit() || it in 'A'..'F' || it == '#' }.take(7)
+                    parseHex(hex)?.let(onChange)
+                },
+                label = { Text(stringResource(R.string.accent_hex)) },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.bodyLarge.copy(fontFamily = FontFamily.Monospace),
+                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Characters, imeAction = ImeAction.Done),
+                modifier = Modifier.weight(1f),
+            )
+        }
+        val done = { onChange(android.graphics.Color.HSVToColor(floatArrayOf(h, s, v))) }
+        ColorSlider(stringResource(R.string.accent_hue), h, 0f..360f, { h = it; hex = toHex(android.graphics.Color.HSVToColor(floatArrayOf(h, s, v))) }, done)
+        ColorSlider(stringResource(R.string.accent_sat), s, 0f..1f, { s = it; hex = toHex(android.graphics.Color.HSVToColor(floatArrayOf(h, s, v))) }, done)
+        ColorSlider(stringResource(R.string.accent_val), v, 0f..1f, { v = it; hex = toHex(android.graphics.Color.HSVToColor(floatArrayOf(h, s, v))) }, done)
+    }
+}
+
+@Composable
+private fun ColorSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit, onDone: () -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.width(112.dp))
+        Slider(value = value, onValueChange = onChange, onValueChangeFinished = onDone, valueRange = range, modifier = Modifier.weight(1f))
+    }
+}
+
+private fun toHex(argb: Int) = "#%06X".format(argb and 0xFFFFFF)
+
+/** "#RRGGBB" or "RRGGBB" → opaque ARGB; null while incomplete. */
+internal fun parseHex(s: String): Int? {
+    val d = s.removePrefix("#")
+    if (d.length != 6) return null
+    return d.toIntOrNull(16)?.let { it or 0xFF000000.toInt() }
 }
 
 @Composable
@@ -179,7 +240,7 @@ private fun CalibrationSection(st: Status) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             val pct = (st.calWeight * 100).toInt()
             Row {
-                Text(stringResource(R.string.cal_title), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.cal_title), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                 Text(if (pct >= 100) stringResource(R.string.cal_ready) else "$pct%", color = MaterialTheme.colorScheme.primary)
             }
             LinearProgressIndicator(
@@ -194,6 +255,8 @@ private fun CalibrationSection(st: Status) {
                 style = MaterialTheme.typography.bodySmall,
             )
             TextButton(onClick = { confirmReset = true }) { Text(stringResource(R.string.cal_reset)) }
+            RowDivider()
+            LearningRows()
         }
     }
     if (confirmReset) {
@@ -212,6 +275,40 @@ private fun CalibrationSection(st: Status) {
             },
             dismissButton = { TextButton(onClick = { confirmReset = false }) { Text(stringResource(R.string.btn_cancel)) } },
         )
+    }
+}
+
+/** Learning from manual ringer changes: switch, what was learned, forget. */
+@Composable
+private fun LearningRows() {
+    val prefs = AutoVol.prefs
+    val on by prefs.learnFromManual.flow.collectAsStateWithLifecycle()
+    val bias by prefs.learnedBias.flow.collectAsStateWithLifecycle()
+    SwitchRow(stringResource(R.string.learn_title), stringResource(R.string.learn_sub), on) {
+        prefs.learnFromManual.value = it
+    }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            if (bias == 0.0) {
+                stringResource(R.string.learn_none)
+            } else {
+                stringResource(
+                    R.string.learn_value,
+                    (if (bias > 0) "+" else "−") + String.format(java.util.Locale.ROOT, "%.1f", kotlin.math.abs(bias)),
+                    stringResource(if (bias > 0) R.string.learn_louder else R.string.learn_quieter),
+                )
+            },
+            color = Oos.TextSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+        if (bias != 0.0) {
+            TextButton(onClick = {
+                AutoVol.engine.resetLearning()
+                AutoVol.log.add("поправка по ручным изменениям сброшена")
+                AutoVolService.instance?.requestCycle()
+            }) { Text(stringResource(R.string.learn_reset)) }
+        }
     }
 }
 
@@ -285,7 +382,7 @@ private fun UpdatesSection() {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(stringResource(R.string.upd_version, Updater.currentVersion(ctx)), style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.upd_version, Updater.currentVersion(ctx)), style = MaterialTheme.typography.bodyLarge)
                     Text(
                         when (val s = state) {
                             Updater.State.Idle -> stringResource(R.string.upd_idle)

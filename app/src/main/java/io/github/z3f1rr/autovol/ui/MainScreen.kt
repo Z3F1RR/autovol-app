@@ -14,6 +14,12 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.ui.unit.lerp
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.layout.SubcomposeLayout
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.BoxWithConstraints
 import io.github.z3f1rr.autovol.Texts
 import io.github.z3f1rr.autovol.R
 import androidx.compose.ui.res.stringResource
@@ -172,24 +178,71 @@ fun MainContent(
     val bannerDismissed by AutoVol.prefs.accessHintDismissed.flow.collectAsStateWithLifecycle()
     val update by Updater.state.collectAsStateWithLifecycle()
 
-    Column(
+    BoxWithConstraints(
         Modifier
             .fillMaxSize()
             .background(Oos.Background)
-            .verticalScroll(rememberScrollState())
             .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(horizontal = 14.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .navigationBarsPadding(),
     ) {
-        Header(enabled, running, status, onToggle, onOpenMore)
-        // Root users always see the hint until it is fixed; others can dismiss it (nothing to do without a PC).
-        if (!live.autoStart && (live.rootManager != null || !bannerDismissed)) AccessBanner(live, refresh)
-        (update as? Updater.State.Available)?.let { UpdateBanner(it.release, onOpenMore) }
-        HeroCard(enabled, running, status, live, pauseUntil, onToggle)
-        VolumeCard(live)
-        CallsCard(live, onRequestPhone)
-        Spacer(Modifier.height(4.dp))
+        val viewport = maxHeight
+        Box(Modifier.verticalScroll(rememberScrollState()).padding(horizontal = 14.dp)) {
+            AdaptiveColumn(
+                viewport = viewport,
+                gap = 8.dp,
+                before = {
+                    Header(enabled, running, status, onToggle, onOpenMore)
+                    // Root users always see the hint until it is fixed; others can dismiss it.
+                    if (!live.autoStart && (live.rootManager != null || !bannerDismissed)) AccessBanner(live, refresh)
+                    (update as? Updater.State.Available)?.let { UpdateBanner(it.release, onOpenMore) }
+                },
+                hero = { extra -> HeroCard(enabled, running, status, live, pauseUntil, onToggle, extra) },
+                after = {
+                    VolumeCard(live)
+                    CallsCard(live, onRequestPhone)
+                },
+            )
+        }
+    }
+}
+
+/**
+ * Fits the screen: measures everything at its compact size and gives the height left on a tall
+ * screen to the hero card ([hero] gets that extra height). On short screens nothing grows and the
+ * column simply scrolls.
+ */
+@Composable
+private fun AdaptiveColumn(
+    viewport: Dp,
+    gap: Dp,
+    before: @Composable () -> Unit,
+    hero: @Composable (extra: Dp) -> Unit,
+    after: @Composable () -> Unit,
+) {
+    SubcomposeLayout { c ->
+        val loose = c.copy(minHeight = 0, maxHeight = Constraints.Infinity)
+        val top = subcompose("before", before).map { it.measure(loose) }
+        val bottom = subcompose("after", after).map { it.measure(loose) }
+        val probe = subcompose("probe") { hero(0.dp) }.map { it.measure(loose) }
+        val gapPx = gap.roundToPx()
+        val count = top.size + bottom.size + 1
+        val used = top.sumOf { it.height } + bottom.sumOf { it.height } + probe.sumOf { it.height } +
+            gapPx * (count - 1) + gapPx // bottom margin
+        val extraPx = (viewport.roundToPx() - used).coerceAtLeast(0)
+        // The hero gets a fixed height (compact + spare) and spreads its content over it.
+        val heroHeight = probe.sumOf { it.height } + extraPx
+        val heroPlaced = subcompose("hero") { hero(extraPx.toDp()) }.map {
+            it.measure(if (extraPx > 0) c.copy(minHeight = heroHeight, maxHeight = heroHeight) else loose)
+        }
+        val all = top + heroPlaced + bottom
+        val height = all.sumOf { it.height } + gapPx * all.size
+        layout(c.maxWidth, height) {
+            var y = 0
+            all.forEach {
+                it.placeRelative(0, y)
+                y += it.height + gapPx
+            }
+        }
     }
 }
 
@@ -197,7 +250,7 @@ fun MainContent(
 private fun UpdateBanner(rel: Updater.Release, onOpenMore: () -> Unit) {
     CompactCard(color = MaterialTheme.colorScheme.primaryContainer) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(stringResource(R.string.update_available, rel.version), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            Text(stringResource(R.string.update_available, rel.version), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
             TextButton(onClick = onOpenMore) { Text(stringResource(R.string.btn_update)) }
         }
     }
@@ -229,9 +282,9 @@ private fun Header(enabled: Boolean, running: Boolean, st: Status, onToggle: (Bo
 
 /** Card with tighter padding for the dense main screen. */
 @Composable
-private fun CompactCard(color: Color = Oos.Card, content: @Composable () -> Unit) {
+private fun CompactCard(modifier: Modifier = Modifier, color: Color = Oos.Card, content: @Composable () -> Unit) {
     Box(
-        Modifier
+        modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(22.dp))
             .background(color)
@@ -255,7 +308,7 @@ private fun AccessBanner(live: Live, refresh: () -> Unit) {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text(stringResource(R.string.hint_title), style = MaterialTheme.typography.titleSmall, color = Oos.Warning)
+                    Text(stringResource(R.string.hint_title), style = MaterialTheme.typography.bodyLarge, color = Oos.Warning)
                     Text(
                         when {
                             live.mic == MicAccess.Level.NONE -> stringResource(R.string.hint_no_mic)
@@ -308,9 +361,17 @@ private fun HeroCard(
     live: Live,
     pauseUntil: Long,
     onToggle: (Boolean) -> Unit,
+    extra: Dp = 0.dp,
 ) {
-    CompactCard {
-        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    // 0 on a compact screen, 1 with 200+ dp to spare: the number grows a little, the chart takes the rest.
+    val f = (extra / 200.dp).coerceIn(0f, 1f)
+    val dbSize = lerp(36.sp, 56.sp, f)
+    val showChart = extra >= 72.dp
+    CompactCard(Modifier.fillMaxHeight()) {
+        Column(
+            Modifier.fillMaxSize(),
+            verticalArrangement = if (extra > 0.dp && !showChart) Arrangement.SpaceEvenly else Arrangement.spacedBy(6.dp),
+        ) {
             if (enabled && !running) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(stringResource(R.string.service_stopped), color = Oos.Warning, modifier = Modifier.weight(1f))
@@ -320,19 +381,26 @@ private fun HeroCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     st.lastDb?.let { String.format(Locale.ROOT, "%.0f", it) } ?: "—",
-                    style = MaterialTheme.typography.displaySmall,
+                    style = MaterialTheme.typography.displaySmall.copy(fontSize = dbSize, lineHeight = dbSize * 1.1f),
                 )
                 Text(" " + stringResource(R.string.unit_dba), color = Oos.TextSecondary, modifier = Modifier.padding(top = 10.dp))
                 Spacer(Modifier.weight(1f))
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
                         if (st.step != null) stringResource(R.string.step_of, st.step, st.steps) else stringResource(R.string.step_none),
-                        style = MaterialTheme.typography.bodyMedium,
+                        style = MaterialTheme.typography.bodyLarge,
                     )
-                    st.pct?.let { Text("$it%", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium) }
+                    st.pct?.let { Text("$it%", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyLarge) }
                 }
             }
-            StepBar(st.step, st.steps)
+            StepBar(st.step, st.steps, lerp(5.dp, 8.dp, f))
+            if (showChart) {
+                val nowSec = System.currentTimeMillis() / 1000
+                // re-read the history whenever a new cycle result arrives
+                val samples = remember(st.timeMs) { AutoVol.engine.history.since(nowSec - CHART_HOURS * 3600L) }
+                val thresholds = remember(st.timeMs) { AutoVol.engine.state.levels.drop(1).map { it.db } }
+                LevelChart(samples, thresholds, nowSec, CHART_HOURS, Modifier.fillMaxWidth().weight(1f).padding(vertical = 8.dp))
+            }
             val reason = Texts.reason(LocalContext.current, st)
             if (reason != null) {
                 Text(
@@ -363,8 +431,10 @@ private fun HeroCard(
     }
 }
 
+private const val CHART_HOURS = 6
+
 @Composable
-private fun StepBar(step: Int?, steps: Int) {
+private fun StepBar(step: Int?, steps: Int, thickness: Dp = 5.dp) {
     val n = steps.coerceAtLeast(1)
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
         for (i in 0..n) {
@@ -372,7 +442,7 @@ private fun StepBar(step: Int?, steps: Int) {
             Box(
                 Modifier
                     .weight(1f)
-                    .height(5.dp)
+                    .height(thickness)
                     .clip(CircleShape)
                     .background(if (on) MaterialTheme.colorScheme.primary else Oos.CardHigh),
             )
@@ -388,8 +458,8 @@ private fun VolumeChip(label: String, v: Int, max: Int, modifier: Modifier) {
             .background(Oos.CardHigh)
             .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
-        Text(label, color = Oos.TextSecondary, style = MaterialTheme.typography.labelSmall)
-        Text("$v/$max", style = MaterialTheme.typography.titleSmall)
+        Text(label, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
+        Text("$v/$max", style = MaterialTheme.typography.bodyLarge)
     }
 }
 
@@ -409,7 +479,7 @@ private fun SliderRow(
     onDone: () -> Unit,
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(96.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.width(96.dp))
         Slider(
             value = value,
             onValueChange = onChange,
@@ -422,9 +492,9 @@ private fun SliderRow(
         Text(
             valueText,
             color = MaterialTheme.colorScheme.primary,
-            style = MaterialTheme.typography.bodyMedium,
+            style = MaterialTheme.typography.bodyLarge,
             textAlign = TextAlign.End,
-            modifier = Modifier.width(64.dp),
+            modifier = Modifier.width(88.dp),
         )
     }
 }
@@ -460,7 +530,7 @@ private fun VolumeCard(live: Live) {
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { ringOpen = !ringOpen }.padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(stringResource(R.string.sensitivity), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Text(stringResource(R.string.sensitivity), style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
                 Text(sensText(ringSens) + if (ringOpen) "  ▴" else "  ▾", color = MaterialTheme.colorScheme.primary)
             }
             if (ringOpen) {

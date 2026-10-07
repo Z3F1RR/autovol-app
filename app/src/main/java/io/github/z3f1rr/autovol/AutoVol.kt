@@ -1,6 +1,7 @@
 package io.github.z3f1rr.autovol
 
 import android.content.Context
+import io.github.z3f1rr.autovol.core.BiasStore
 import io.github.z3f1rr.autovol.core.Engine
 import io.github.z3f1rr.autovol.core.History
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -29,7 +30,16 @@ object AutoVol {
 
     val engine: Engine
         get() = engineInstance ?: synchronized(this) {
-            engineInstance ?: Engine(platform, History(FileHistoryStore(app))).also { engineInstance = it }
+            engineInstance ?: Engine(
+                platform,
+                History(FileHistoryStore(app)),
+                biasStore = object : BiasStore {
+                    override fun load() = prefs.learnedBias.value
+                    override fun save(biasDb: Double) {
+                        prefs.learnedBias.value = biasDb
+                    }
+                },
+            ).also { engineInstance = it }
         }
 
     private val _status = MutableStateFlow(Status())

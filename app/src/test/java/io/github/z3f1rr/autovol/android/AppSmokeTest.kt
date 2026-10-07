@@ -70,7 +70,7 @@ class AppSmokeTest {
     @Test
     fun mainScreenShowsAccessHintWithoutRootControls() {
         compose.onNodeWithText("AutoVol").assertExists()
-        compose.onNodeWithText("Нет автозапуска после перезагрузки").assertExists()
+        compose.onNodeWithText("Нет автозапуска").assertExists()
         // no root manager installed: nothing about root anywhere
         compose.onNodeWithText("Настроить через root").assertDoesNotExist()
         compose.onNodeWithText("Root", substring = true).assertDoesNotExist()
@@ -86,7 +86,7 @@ class AppSmokeTest {
     @Test
     fun hintCanBeDismissedWithoutRoot() {
         compose.onNodeWithText("Скрыть").performClick()
-        compose.onNodeWithText("Нет автозапуска после перезагрузки").assertDoesNotExist()
+        compose.onNodeWithText("Нет автозапуска").assertDoesNotExist()
     }
 
     @Test

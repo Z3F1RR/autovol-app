@@ -411,4 +411,67 @@ class EngineTest {
         cycle()
         assertEquals(10, p.media())
     }
+
+    @Test
+    fun manualRaiseIsLearnedAsLouder() {
+        val bias = MemoryBiasStore()
+        val eng = Engine(p, History(store), biasStore = bias)
+        p.queue(-60.0)
+        eng.cycle(s)
+        assertEquals(1, p.ring())
+        p.userSets(6) // too quiet for the user
+        val r = eng.cycle(s)
+        assertEquals(Outcome.SKIPPED, r.outcome)
+        assertEquals(1.5, eng.state.learnedBiasDb, 0.0)
+        assertEquals(1.5, bias.value, 0.0)
+        assertTrue(p.logs.any { it.contains("учтено (громче)") })
+        // after the override the thresholds are 1.5 dB lower: -47 now reaches step 1 (-46 → -47.5)
+        p.advanceSec(31 * 60)
+        p.queue(-47.0, -47.0)
+        eng.cycle(s)
+        assertEquals(1, eng.state.step)
+        assertEquals(-47.5, eng.state.levels[1].db, 0.0)
+    }
+
+    @Test
+    fun manualLowerIsLearnedAsQuieterAndCancelsRaise() {
+        val bias = MemoryBiasStore(1.5)
+        val eng = Engine(p, History(store), biasStore = bias)
+        assertEquals(1.5, eng.state.learnedBiasDb, 0.0) // loaded from the store
+        p.queue(-35.0, -35.0)
+        eng.cycle(s)
+        p.userSets(p.ring() - 2)
+        eng.cycle(s)
+        assertEquals(0.0, eng.state.learnedBiasDb, 0.0)
+    }
+
+    @Test
+    fun learningIsClampedAndCanBeDisabledOrReset() {
+        val bias = MemoryBiasStore(8.5)
+        val eng = Engine(p, History(store), biasStore = bias)
+        p.queue(-60.0)
+        eng.cycle(s)
+        p.userSets(9)
+        eng.cycle(s)
+        assertEquals(Settings.LEARN_MAX_DB, eng.state.learnedBiasDb, 0.0)
+        // disabled: a change is still respected as manual, but nothing is learned
+        p.advanceSec(31 * 60)
+        p.queue(-60.0)
+        eng.cycle(s.copy(learnFromManual = false))
+        p.userSets(12)
+        eng.cycle(s.copy(learnFromManual = false))
+        assertEquals(Settings.LEARN_MAX_DB, eng.state.learnedBiasDb, 0.0)
+        eng.resetLearning()
+        assertEquals(0.0, bias.value, 0.0)
+    }
+
+    @Test
+    fun switchingToSilentIsNotLearned() {
+        val eng = Engine(p, History(store), biasStore = MemoryBiasStore())
+        p.queue(-60.0)
+        eng.cycle(s)
+        p.userSets(0)
+        eng.cycle(s)
+        assertEquals(0.0, eng.state.learnedBiasDb, 0.0)
+    }
 }

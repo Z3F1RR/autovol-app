@@ -23,6 +23,7 @@ import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -186,16 +187,36 @@ fun AutoVolTheme(content: @Composable () -> Unit) {
         outlineVariant = c.divider,
         error = c.error,
     )
-    val t = Typography()
-    val typography = t.copy(
-        displayMedium = t.displayMedium.copy(fontWeight = FontWeight.Light, fontSize = 56.sp),
-        headlineLarge = t.headlineLarge.copy(fontWeight = FontWeight.SemiBold, fontSize = 32.sp),
-        titleMedium = t.titleMedium.copy(fontWeight = FontWeight.Medium, fontSize = 17.sp),
-        labelMedium = t.labelMedium.copy(fontWeight = FontWeight.Medium, letterSpacing = 0.6.sp),
-    )
-    CompositionLocalProvider(LocalOosColors provides c) {
-        MaterialTheme(colorScheme = scheme, typography = typography) {
+    MaterialTheme(colorScheme = scheme, typography = AppTypography) {
+        CompositionLocalProvider(LocalOosColors provides c) {
             Surface(color = c.background, contentColor = c.textPrimary, content = content)
         }
     }
 }
+
+/**
+ * One small type scale for the whole app, so rows look the same everywhere: headlineMedium = screen
+ * title, bodyLarge = every row title and value, bodySmall = every secondary line, labelMedium = section
+ * labels. Tabular figures keep numbers from shifting the layout when they change.
+ */
+private val AppTypography: Typography = Typography().let { t ->
+    fun TextStyle.tab() = copy(fontFeatureSettings = "tnum")
+    t.copy(
+        displayLarge = t.displayLarge.copy(fontWeight = FontWeight.Light).tab(),
+        displayMedium = t.displayMedium.copy(fontWeight = FontWeight.Light).tab(),
+        displaySmall = t.displaySmall.copy(fontWeight = FontWeight.Light).tab(),
+        headlineLarge = t.headlineLarge.copy(fontWeight = FontWeight.SemiBold).tab(),
+        headlineMedium = t.headlineMedium.copy(fontWeight = FontWeight.SemiBold).tab(),
+        headlineSmall = t.headlineSmall.tab(),
+        titleLarge = t.titleLarge.tab(),
+        titleMedium = t.titleMedium.tab(),
+        titleSmall = t.titleSmall.tab(),
+        bodyLarge = t.bodyLarge.tab(),
+        bodyMedium = t.bodyMedium.tab(),
+        bodySmall = t.bodySmall.tab(),
+        labelLarge = t.labelLarge.tab(),
+        labelMedium = t.labelMedium.copy(fontWeight = FontWeight.Medium, letterSpacing = 0.6.sp).tab(),
+        labelSmall = t.labelSmall.tab(),
+    )
+}
+

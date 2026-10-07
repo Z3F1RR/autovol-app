@@ -5,7 +5,7 @@
     <string name="status_running">Работает</string>
     <string name="status_running_at">Работает · проверка в %1$s</string>
     <string name="more_cd">Ещё</string>
-    <string name="hint_title">Нет автозапуска после перезагрузки</string>
+    <string name="hint_title">Нет автозапуска</string>
     <string name="hint_no_mic">Нет разрешения на микрофон</string>
     <string name="hint_root">Разрешите AutoVol в %1$s</string>
     <string name="hint_basic">После перезагрузки — касанием уведомления</string>
@@ -140,4 +140,17 @@
     <string name="act_resume">Возобновить</string>
     <string name="resume_title">Автогромкость остановлена</string>
     <string name="resume_text">Нажмите, чтобы возобновить</string>
+    <string name="learn_title">Учитывать мои изменения</string>
+    <string name="learn_sub">Если вы часто прибавляете или убавляете звонок, AutoVol подстроится</string>
+    <string name="learn_value">Учтено: %1$s дБ, %2$s</string>
+    <string name="learn_louder">громче</string>
+    <string name="learn_quieter">тише</string>
+    <string name="learn_none">Пока ничего не учтено</string>
+    <string name="learn_reset">Забыть</string>
+    <string name="accent_hex">Код цвета</string>
+    <string name="accent_hue">Оттенок</string>
+    <string name="accent_sat">Насыщенность</string>
+    <string name="accent_val">Яркость</string>
+    <string name="chart_hours">Последние %1$d ч</string>
+    <string name="chart_empty">График появится после первых замеров</string>
 </resources>

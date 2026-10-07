@@ -64,7 +64,7 @@ fun RowDivider() = HorizontalDivider(color = Oos.Divider, modifier = Modifier.pa
 fun SwitchRow(title: String, subtitle: String?, checked: Boolean, enabled: Boolean = true, onChange: (Boolean) -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f).padding(end = 12.dp)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = if (enabled) Oos.TextPrimary else Oos.TextSecondary)
+            Text(title, style = MaterialTheme.typography.bodyLarge, color = if (enabled) Oos.TextPrimary else Oos.TextSecondary)
             if (subtitle != null) Text(subtitle, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
         }
         Switch(checked = checked, onCheckedChange = onChange, enabled = enabled)
@@ -88,7 +88,7 @@ fun StatusRow(title: String, ok: Boolean, okText: String, badText: String, actio
         Box(Modifier.size(8.dp).clip(CircleShape).background(if (ok) Oos.Ok else Oos.Warning))
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(title, style = MaterialTheme.typography.bodyLarge)
             Text(if (ok) okText else badText, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
         }
         if (!ok && action != null) TextButton(onClick = onAction) { Text(action) }
@@ -103,10 +103,10 @@ fun NavRow(title: String, subtitle: String?, onClick: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(title, style = MaterialTheme.typography.bodyLarge)
             if (subtitle != null) Text(subtitle, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
         }
-        Text("›", color = Oos.TextSecondary, style = MaterialTheme.typography.headlineLarge)
+        Text("›", color = Oos.TextSecondary, style = MaterialTheme.typography.headlineSmall)
     }
 }
 

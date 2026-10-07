@@ -76,10 +76,13 @@ object Levels {
     }
 
     /** Ringer sensitivity: a positive value lowers the thresholds (volume rises in quieter places). */
-    fun withSensitivity(lv: List<Level>, notches: Int): List<Level> {
-        if (notches == 0) return lv
-        val shift = notches.coerceIn(-Settings.SENS_MAX, Settings.SENS_MAX) * Settings.SENS_DB_PER_NOTCH
-        return lv.mapIndexed { i, l -> if (i == 0) l else l.copy(db = round1(l.db - shift)) }
+    fun withSensitivity(lv: List<Level>, notches: Int): List<Level> =
+        louderBy(lv, notches.coerceIn(-Settings.SENS_MAX, Settings.SENS_MAX) * Settings.SENS_DB_PER_NOTCH)
+
+    /** Lowers every threshold but the first by [db] (positive = louder in the same noise). */
+    fun louderBy(lv: List<Level>, db: Double): List<Level> {
+        if (db == 0.0) return lv
+        return lv.mapIndexed { i, l -> if (i == 0) l else l.copy(db = round1(l.db - db)) }
     }
 
     /** Python 3 round(): half to even. */

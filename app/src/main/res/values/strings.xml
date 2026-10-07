@@ -6,7 +6,7 @@
     <string name="status_running">Running</string>
     <string name="status_running_at">Running · checked at %1$s</string>
     <string name="more_cd">More</string>
-    <string name="hint_title">No autostart after reboot</string>
+    <string name="hint_title">No autostart</string>
     <string name="hint_no_mic">No microphone permission</string>
     <string name="hint_root">Allow AutoVol in %1$s</string>
     <string name="hint_basic">After reboot, tap the notification to resume</string>
@@ -144,4 +144,17 @@
     <string name="act_resume">Resume</string>
     <string name="resume_title">Auto volume stopped</string>
     <string name="resume_text">Tap to resume</string>
+    <string name="learn_title">Learn from my changes</string>
+    <string name="learn_sub">If you often turn the ringer up or down, AutoVol adjusts to it</string>
+    <string name="learn_value">Learned: %1$s dB, %2$s</string>
+    <string name="learn_louder">louder</string>
+    <string name="learn_quieter">quieter</string>
+    <string name="learn_none">Nothing learned yet</string>
+    <string name="learn_reset">Forget</string>
+    <string name="accent_hex">Colour code</string>
+    <string name="accent_hue">Hue</string>
+    <string name="accent_sat">Saturation</string>
+    <string name="accent_val">Brightness</string>
+    <string name="chart_hours">Last %1$d h</string>
+    <string name="chart_empty">The chart appears after the first measurements</string>
 </resources>

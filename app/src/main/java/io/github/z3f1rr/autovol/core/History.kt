@@ -17,6 +17,10 @@ class History(private val store: HistoryStore) {
     @Synchronized
     fun values(): List<Double> = items.map { it.db }
 
+    /** Samples not older than [sinceSec] (epoch seconds), oldest first — for the level chart. */
+    @Synchronized
+    fun since(sinceSec: Long): List<Sample> = items.filter { it.tSec >= sinceSec }
+
     @Synchronized
     fun add(db: Double, nowMs: Long, calDays: Int) {
         val now = nowMs / 1000

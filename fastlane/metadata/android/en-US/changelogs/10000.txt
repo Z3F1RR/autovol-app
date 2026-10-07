@@ -1,7 +1,8 @@
 First release.
-• Ring and notification volume by ambient noise (A-weighted), with spike filtering and continuous calibration.
+• Ring and notification volume by ambient noise (dBA), spike filtering, continuous calibration.
+• Learns from your manual volume changes.
 • Optional media volume and full volume for repeat calls.
 • Pauses in vibrate, DND, calls, headphones/Bluetooth, car mode, low battery.
 • Optional root: autostart after reboot.
-• Light/dark/black themes, system or custom accent, English and Russian.
+• 6-hour noise chart, themes, custom accent, English and Russian.
 • In-app updates from GitHub Releases.
