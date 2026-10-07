@@ -6,8 +6,10 @@ import kotlin.math.max
 
 /** Level of one recording plus diagnostics. */
 data class Analysis(
-    /** RMS of the AC part in dBFS: the ambient level. */
+    /** A-weighted RMS in dBFS: the ambient level used for decisions. */
     val db: Double,
+    /** Unweighted RMS without DC in dBFS (diagnostics). */
+    val flatDb: Double,
     /** DC offset of the raw signal in dBFS (diagnostics). */
     val dcDb: Double,
     /** Peak of the raw signal, in samples (0..32768). */
@@ -16,37 +18,44 @@ data class Analysis(
 )
 
 /**
- * Streaming RMS meter for 16-bit PCM. The first [skip] samples are ignored (AudioRecord start-up).
+ * Streaming level meter for 16-bit PCM. The first [skip] samples are ignored (AudioRecord start-up;
+ * the filter runs through them so its transient has settled).
  *
- * The mean (DC offset) of the analysed part is removed: raw UNPROCESSED capture can carry a constant
- * offset that alone reads as ~-42 dBFS and hides the real sound. The script measured AAC files,
- * which have no DC component, so removing it keeps the numbers comparable.
+ * Raw UNPROCESSED capture has a DC offset and strong low-frequency rumble; together they read as
+ * ~-45 dBFS in a silent room and leave only ~10 dB to real noise. The decision level is therefore
+ * A-weighted ([AWeighting]); the unweighted level is kept for diagnostics.
  */
-class LevelAnalyzer(private val skip: Int) {
+class LevelAnalyzer(private val skip: Int, rate: Int = 16000) {
+    private val weighting = AWeighting(rate)
     private var seen = 0L
     private var sum = 0.0
     private var sumSq = 0.0
+    private var sumSqA = 0.0
     private var counted = 0L
     private var peak = 0
 
     fun feed(buf: ShortArray, n: Int) {
         for (i in 0 until n) {
-            if (seen++ < skip) continue
             val x = buf[i].toDouble()
+            val a = weighting.process(x)
+            if (seen++ < skip) continue
             sum += x
             sumSq += x * x
+            sumSqA += a * a
             counted++
             peak = max(peak, abs(buf[i].toInt()))
         }
     }
 
     fun result(): Analysis {
-        if (counted == 0L) return Analysis(-120.0, -120.0, 0, 0)
+        if (counted == 0L) return Analysis(-120.0, -120.0, -120.0, 0, 0)
         val mean = sum / counted
         val variance = max(0.0, sumSq / counted - mean * mean)
         // Digital silence (system muted the mic): report -120 like "-inf" in the script.
-        val db = if (peak <= SILENT_PEAK) -120.0 else powerDb(variance)
-        return Analysis(db, amplitudeDb(abs(mean)), peak, counted)
+        val silent = peak <= SILENT_PEAK
+        val db = if (silent) -120.0 else powerDb(sumSqA / counted)
+        val flat = if (silent) -120.0 else powerDb(variance)
+        return Analysis(db, flat, amplitudeDb(abs(mean)), peak, counted)
     }
 
     companion object {

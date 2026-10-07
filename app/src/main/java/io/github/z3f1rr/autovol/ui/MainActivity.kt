@@ -22,6 +22,10 @@ class MainActivity : ComponentActivity() {
         if (granted) enableAfterPermissions() else AutoVol.log.add("разрешение на микрофон не выдано")
     }
     private val notifRequest = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val phoneRequest = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
+        val denied = r.filterValues { !it }.keys.map { it.substringAfterLast('.') }
+        if (denied.isNotEmpty()) AutoVol.log.add("повторный звонок: не выданы разрешения ${denied.joinToString()}")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -34,7 +38,11 @@ class MainActivity : ComponentActivity() {
                 if (showLog) {
                     LogScreen(onBack = { showLog = false })
                 } else {
-                    MainScreen(onToggle = ::toggle, onOpenLog = { showLog = true })
+                    MainScreen(
+                        onToggle = ::toggle,
+                        onOpenLog = { showLog = true },
+                        onRequestPhone = ::requestPhonePermissions,
+                    )
                 }
             }
         }
@@ -61,6 +69,15 @@ class MainActivity : ComponentActivity() {
             resumeRequested = false
             if (AutoVol.prefs.enabled && hasMic()) AutoVolService.startFromUi(this)
         }
+    }
+
+    /** Call state for the repeat-call boost; the call log only for "same number" mode. */
+    private fun requestPhonePermissions(sameNumber: Boolean) {
+        val need = buildList {
+            add(Manifest.permission.READ_PHONE_STATE)
+            if (sameNumber) add(Manifest.permission.READ_CALL_LOG)
+        }.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+        if (need.isNotEmpty()) phoneRequest.launch(need.toTypedArray())
     }
 
     private fun hasMic() = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED

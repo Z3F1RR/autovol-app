@@ -14,6 +14,11 @@ object Scheduler {
         PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
     )
 
+    /** elapsedRealtime of the pending alarm, to measure how late the system delivers it. */
+    @Volatile
+    var plannedAt = 0L
+        private set
+
     fun canExact(ctx: Context): Boolean =
         Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
             ctx.getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
@@ -21,6 +26,7 @@ object Scheduler {
     fun schedule(ctx: Context, sec: Int) {
         val am = ctx.getSystemService(AlarmManager::class.java)
         val at = SystemClock.elapsedRealtime() + sec * 1000L
+        plannedAt = at
         try {
             if (canExact(ctx)) {
                 am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi(ctx))

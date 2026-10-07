@@ -1,8 +1,10 @@
 package io.github.z3f1rr.autovol.ui
 
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.os.PowerManager
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,8 +24,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import io.github.z3f1rr.autovol.AutoVol
+import io.github.z3f1rr.autovol.AutoVolService
 import io.github.z3f1rr.autovol.BuildConfigInfo
 import io.github.z3f1rr.autovol.MicAccess
+import io.github.z3f1rr.autovol.Scheduler
 import io.github.z3f1rr.autovol.core.Levels
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,12 +59,34 @@ fun LogScreen(onBack: () -> Unit) {
     }
 }
 
+/** What can delay the cycles: exact alarm permission, battery optimisation, standby bucket. */
+private fun systemInfo(ctx: Context): String {
+    val pm = ctx.getSystemService(PowerManager::class.java)
+    val bucket = when (val b = ctx.getSystemService(UsageStatsManager::class.java).appStandbyBucket) {
+        UsageStatsManager.STANDBY_BUCKET_ACTIVE -> "active"
+        UsageStatsManager.STANDBY_BUCKET_WORKING_SET -> "working_set"
+        UsageStatsManager.STANDBY_BUCKET_FREQUENT -> "frequent"
+        UsageStatsManager.STANDBY_BUCKET_RARE -> "rare"
+        UsageStatsManager.STANDBY_BUCKET_RESTRICTED -> "restricted"
+        else -> b.toString()
+    }
+    fun yn(b: Boolean) = if (b) "да" else "нет"
+    return "точные будильники: ${yn(Scheduler.canExact(ctx))}" +
+        " · батарея без ограничений: ${yn(pm.isIgnoringBatteryOptimizations(ctx.packageName))}" +
+        " · bucket: $bucket" +
+        " · опоздание будильника: ${AutoVolService.lastLateSec} с (макс. ${AutoVolService.maxLateSec} с)"
+}
+
 private fun share(ctx: Context) {
     val s = AutoVol.prefs.settings()
     val st = AutoVol.engine.state
     val header = buildString {
         appendLine("AutoVol ${BuildConfigInfo.versionName(ctx)} · ${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.RELEASE}")
-        appendLine("микрофон: ${MicAccess.level(ctx).name.lowercase()} · мин. громкость ${s.minVol}")
+        appendLine(
+            "микрофон: ${MicAccess.level(ctx).name.lowercase()} (RECORD_AUDIO=${MicAccess.rawMode(ctx)})" +
+                " · мин. громкость ${s.minVol}",
+        )
+        appendLine(systemInfo(ctx))
         appendLine("пороги сейчас: ${Levels.format(st.levels.ifEmpty { s.levels })}")
         appendLine("замер: ${AutoVol.platform.meter.diagnostics()}")
         appendLine()

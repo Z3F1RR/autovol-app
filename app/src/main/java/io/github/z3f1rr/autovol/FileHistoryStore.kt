@@ -14,12 +14,13 @@ class FileHistoryStore(context: Context) : HistoryStore {
     private val file = AtomicFile(File(context.filesDir, FILE))
 
     init {
-        // v1 history was measured without DC removal and would skew calibration.
+        // Older histories were measured differently (v1: with DC, v2: unweighted) and would skew calibration.
         File(context.filesDir, "history.bin").delete()
+        File(context.filesDir, "history-v2.bin").delete()
     }
 
     private companion object {
-        const val FILE = "history-v2.bin"
+        const val FILE = "history-v3.bin"
     }
 
     override fun load(): List<Sample> = try {

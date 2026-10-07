@@ -4,13 +4,15 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.SystemClock
 
 /** Fires on the AlarmManager schedule and runs one cycle in the service. */
 class AlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val svc = AutoVolService.instance
         if (svc != null) {
-            svc.requestCycle()
+            val planned = Scheduler.plannedAt
+            svc.requestCycle(lateSec = if (planned > 0) ((SystemClock.elapsedRealtime() - planned) / 1000).toInt() else null)
         } else if (AutoVol.prefs.enabled) {
             // Process was killed: try to come back (works in full-access mode).
             AutoVolService.startFromBackground(context, "повторная попытка")

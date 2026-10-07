@@ -27,6 +27,9 @@ class AutoVolService : Service() {
     private var lastNote: String? = null
     private var diagLogged = false
 
+    @Volatile
+    private var diagRequested = false
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
@@ -94,8 +97,17 @@ class AutoVolService : Service() {
         return false
     }
 
-    /** Runs one cycle soon. Safe to call from any thread; requests arriving mid-cycle are merged. */
-    fun requestCycle() {
+    /**
+     * Runs one cycle soon. Safe to call from any thread; requests arriving mid-cycle are merged.
+     * [diag] logs measurement diagnostics after the cycle ("Проверить сейчас"); [lateSec] is how late
+     * the alarm was delivered.
+     */
+    fun requestCycle(diag: Boolean = false, lateSec: Int? = null) {
+        if (diag) diagRequested = true
+        if (lateSec != null) {
+            lastLateSec = lateSec
+            maxLateSec = maxOf(maxLateSec, lateSec)
+        }
         if (!queued.compareAndSet(false, true)) return
         wakeLock.acquire(WAKE_MS)
         try {
@@ -114,6 +126,7 @@ class AutoVolService : Service() {
     }
 
     private fun runCycle() {
+        CallReceiver.restoreIfStale(this)
         val settings = AutoVol.prefs.settings()
         val engine = AutoVol.engine
         val r = try {
@@ -123,9 +136,10 @@ class AutoVolService : Service() {
             CycleResult(120, "исключение: ${e.javaClass.simpleName} ${e.message}", Outcome.SKIPPED)
         }
         if (r.note != lastNote || " дБ" in r.note) AutoVol.log.add(r.note)
-        if (!diagLogged) {
+        if (!diagLogged || diagRequested) {
             AutoVol.platform.meter.last?.let {
                 diagLogged = true
+                diagRequested = false
                 AutoVol.log.add("замер: ${AutoVol.platform.meter.diagnostics()}")
             }
         }
@@ -155,6 +169,7 @@ class AutoVolService : Service() {
 
     override fun onDestroy() {
         if (instance === this) instance = null
+        maxLateSec = 0
         Scheduler.cancel(this)
         executor.shutdownNow()
         if (wakeLock.isHeld) wakeLock.release()
@@ -170,6 +185,15 @@ class AutoVolService : Service() {
 
         @Volatile
         var instance: AutoVolService? = null
+            private set
+
+        /** Alarm delivery delay, seconds: last one and the worst since the service started. */
+        @Volatile
+        var lastLateSec = 0
+            private set
+
+        @Volatile
+        var maxLateSec = 0
             private set
 
         private fun typeName(t: Int) = when (t) {

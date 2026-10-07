@@ -16,7 +16,11 @@ data class Settings(
     val confirmSec: Int = 12,
     val overrideMin: Int = 30,
     val recSec: Int = 2,
-    val silentDb: Int = -85,
+    /**
+     * At or below = mic muted by the system. The script used -85 for unfiltered AAC; an A-weighted quiet
+     * room can read lower, and true digital silence is reported as exactly -120 by [LevelAnalyzer].
+     */
+    val silentDb: Int = -100,
     val lowBat: Int = 15,
     val pauseOnDnd: Boolean = true,
     val pauseOnExtAudio: Boolean = true,

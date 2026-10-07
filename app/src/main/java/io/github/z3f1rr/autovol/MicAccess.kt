@@ -14,22 +14,30 @@ object MicAccess {
         if (ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             return Level.NONE
         }
-        val ops = ctx.getSystemService(AppOpsManager::class.java)
-        @Suppress("DEPRECATION")
-        val mode = ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), ctx.packageName)
-        return when (mode) {
+        return when (rawModeInt(ctx)) {
             AppOpsManager.MODE_ALLOWED -> Level.FULL
             AppOpsManager.MODE_FOREGROUND, AppOpsManager.MODE_DEFAULT -> Level.BASIC
             else -> Level.NONE
         }
     }
 
-    /** Raw appop mode name, for the log. */
-    fun rawMode(ctx: Context): String {
+    /**
+     * The configured mode, not the effective one: unsafeCheckOpNoThrow() evaluates "foreground" against
+     * the current process state (allow while on screen, ignore in background), which made basic mode
+     * look like full access whenever the app was open.
+     */
+    private fun rawModeInt(ctx: Context): Int {
         val ops = ctx.getSystemService(AppOpsManager::class.java)
         @Suppress("DEPRECATION")
-        val mode = ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), ctx.packageName)
-        return when (mode) {
+        return ops.unsafeCheckOpRawNoThrow(AppOpsManager.OPSTR_RECORD_AUDIO, Process.myUid(), ctx.packageName)
+    }
+
+    /** Raw appop mode name, for the log. */
+    fun rawMode(ctx: Context): String {
+        if (ctx.checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            return "нет разрешения"
+        }
+        return when (val mode = rawModeInt(ctx)) {
             AppOpsManager.MODE_ALLOWED -> "allow"
             AppOpsManager.MODE_FOREGROUND -> "foreground"
             AppOpsManager.MODE_IGNORED -> "ignore"

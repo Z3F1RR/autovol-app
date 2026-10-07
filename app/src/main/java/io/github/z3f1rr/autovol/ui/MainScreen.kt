@@ -1,10 +1,12 @@
 package io.github.z3f1rr.autovol.ui
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
@@ -29,6 +31,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
@@ -59,6 +62,7 @@ import io.github.z3f1rr.autovol.AutoVolService
 import io.github.z3f1rr.autovol.MicAccess
 import io.github.z3f1rr.autovol.Scheduler
 import io.github.z3f1rr.autovol.Status
+import io.github.z3f1rr.autovol.core.RepeatMode
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -73,6 +77,8 @@ private data class Live(
     val mic: MicAccess.Level = MicAccess.Level.NONE,
     val exactAlarms: Boolean = true,
     val batteryUnrestricted: Boolean = true,
+    val phoneState: Boolean = false,
+    val callLog: Boolean = false,
 )
 
 private fun readLive(ctx: Context): Live {
@@ -86,6 +92,8 @@ private fun readLive(ctx: Context): Live {
         mic = MicAccess.level(ctx),
         exactAlarms = Scheduler.canExact(ctx),
         batteryUnrestricted = pm.isIgnoringBatteryOptimizations(ctx.packageName),
+        phoneState = ctx.checkSelfPermission(Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED,
+        callLog = ctx.checkSelfPermission(Manifest.permission.READ_CALL_LOG) == PackageManager.PERMISSION_GRANTED,
     )
 }
 
@@ -93,7 +101,7 @@ private fun hms(ms: Long) = SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(Dat
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(onToggle: (Boolean) -> Unit, onOpenLog: () -> Unit) {
+fun MainScreen(onToggle: (Boolean) -> Unit, onOpenLog: () -> Unit, onRequestPhone: (sameNumber: Boolean) -> Unit) {
     val ctx = LocalContext.current
     val enabled by AutoVol.prefs.enabledFlow.collectAsStateWithLifecycle()
     val running by AutoVol.serviceRunning.collectAsStateWithLifecycle()
@@ -129,6 +137,7 @@ fun MainScreen(onToggle: (Boolean) -> Unit, onOpenLog: () -> Unit) {
             ToggleCard(enabled, running, onToggle)
             if (enabled) StatusCard(status, live, pauseUntil)
             MinVolumeCard(live)
+            RepeatCallCard(live, onRequestPhone)
             AccessCard(live)
             if (!live.exactAlarms) {
                 HintCard(
@@ -225,7 +234,7 @@ private fun StatusCard(st: Status, live: Live, pauseUntil: Long) {
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = { AutoVolService.instance?.requestCycle() }) { Text("Проверить сейчас") }
+                OutlinedButton(onClick = { AutoVolService.instance?.requestCycle(diag = true) }) { Text("Проверить сейчас") }
                 if (pauseUntil > System.currentTimeMillis()) {
                     OutlinedButton(onClick = {
                         AutoVol.prefs.pauseUntilMs = 0
@@ -277,6 +286,67 @@ private fun MinVolumeCard(live: Live) {
                 valueRange = 1f..max.toFloat(),
                 steps = (max - 2).coerceAtLeast(0),
             )
+        }
+    }
+}
+
+@Composable
+private fun RepeatCallCard(live: Live, onRequestPhone: (sameNumber: Boolean) -> Unit) {
+    val s by AutoVol.prefs.repeatFlow.collectAsStateWithLifecycle()
+    var window by remember(s.windowMin) { mutableFloatStateOf(s.windowMin.toFloat()) }
+    val same = s.mode == RepeatMode.SAME_NUMBER
+    Card(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Повторный звонок — на максимум", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Если после пропущенного звонка звонят снова, звонок звучит на полной громкости. " +
+                            "В режиме вибро/без звука не срабатывает.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = s.enabled,
+                    onCheckedChange = {
+                        AutoVol.prefs.repeat = s.copy(enabled = it)
+                        if (it) onRequestPhone(same)
+                    },
+                )
+            }
+            if (s.enabled) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = same, onClick = {
+                        AutoVol.prefs.repeat = s.copy(mode = RepeatMode.SAME_NUMBER)
+                        onRequestPhone(true)
+                    })
+                    Text("С того же номера")
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(selected = !same, onClick = {
+                        AutoVol.prefs.repeat = s.copy(mode = RepeatMode.ANY_NUMBER)
+                    })
+                    Text("С любого номера")
+                }
+                Text("В течение ${window.toInt()} мин после пропущенного")
+                Slider(
+                    value = window,
+                    onValueChange = { window = it },
+                    onValueChangeFinished = { AutoVol.prefs.repeat = s.copy(windowMin = window.toInt()) },
+                    valueRange = 5f..60f,
+                    steps = 10,
+                )
+                val missing = when {
+                    !live.phoneState -> "Нет разрешения «Телефон» — функция не работает."
+                    same && !live.callLog -> "Нет доступа к журналу вызовов — номер не виден, режим «с того же номера» не сработает."
+                    else -> null
+                }
+                if (missing != null) {
+                    Text(missing, color = MaterialTheme.colorScheme.error)
+                    FilledTonalButton(onClick = { onRequestPhone(same) }) { Text("Выдать разрешение") }
+                }
+            }
         }
     }
 }

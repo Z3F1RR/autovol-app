@@ -1,12 +1,20 @@
 package io.github.z3f1rr.autovol
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
+import io.github.z3f1rr.autovol.core.CallsState
 import io.github.z3f1rr.autovol.core.Levels
+import io.github.z3f1rr.autovol.core.MissedCall
+import io.github.z3f1rr.autovol.core.RepeatMode
+import io.github.z3f1rr.autovol.core.RepeatSettings
 import io.github.z3f1rr.autovol.core.Settings
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import org.json.JSONArray
+import org.json.JSONException
+import org.json.JSONObject
 
 /** SharedPreferences-backed settings. Keys match the script's config names in lower case. */
 class Prefs(context: Context) {
@@ -41,6 +49,38 @@ class Prefs(context: Context) {
         set(v) {
             sp.edit().putLong("pause_until", v).apply()
             _pauseUntil.value = v
+        }
+
+    private val _repeat = MutableStateFlow(
+        RepeatSettings(
+            enabled = sp.getBoolean("repeat_enabled", false),
+            mode = if (sp.getString("repeat_mode", null) == RepeatMode.ANY_NUMBER.name) {
+                RepeatMode.ANY_NUMBER
+            } else {
+                RepeatMode.SAME_NUMBER
+            },
+            windowMin = sp.getInt("repeat_window_min", RepeatSettings().windowMin),
+        ),
+    )
+    val repeatFlow: StateFlow<RepeatSettings> = _repeat.asStateFlow()
+
+    var repeat: RepeatSettings
+        get() = _repeat.value
+        set(v) {
+            sp.edit()
+                .putBoolean("repeat_enabled", v.enabled)
+                .putString("repeat_mode", v.mode.name)
+                .putInt("repeat_window_min", v.windowMin)
+                .apply()
+            _repeat.value = v
+        }
+
+    /** Repeat-call state machine; written synchronously, the process may die right after. */
+    var callsState: CallsState
+        get() = callsFromJson(sp.getString("calls_state", null))
+        @SuppressLint("ApplySharedPref")
+        set(v) {
+            sp.edit().putString("calls_state", callsToJson(v)).commit()
         }
 
     fun settings(): Settings = Settings(
@@ -79,5 +119,35 @@ class Prefs(context: Context) {
 
     private companion object {
         const val K_ENABLED = "enabled"
+
+        fun callsToJson(s: CallsState): String = JSONObject().apply {
+            put("missed", JSONArray().apply {
+                s.missed.forEach { m -> put(JSONObject().put("t", m.tMs).put("n", m.number ?: "")) }
+            })
+            put("ringing", s.ringing)
+            s.ringingNumber?.let { put("number", it) }
+            put("answered", s.answered)
+            s.boostedFrom?.let { put("boostedFrom", it) }
+        }.toString()
+
+        fun callsFromJson(json: String?): CallsState {
+            if (json.isNullOrEmpty()) return CallsState()
+            return try {
+                val o = JSONObject(json)
+                val arr = o.optJSONArray("missed") ?: JSONArray()
+                CallsState(
+                    missed = List(arr.length()) { i ->
+                        val m = arr.getJSONObject(i)
+                        MissedCall(m.getLong("t"), m.optString("n").ifEmpty { null })
+                    },
+                    ringing = o.optBoolean("ringing"),
+                    ringingNumber = if (o.has("number")) o.getString("number") else null,
+                    answered = o.optBoolean("answered"),
+                    boostedFrom = if (o.has("boostedFrom")) o.getInt("boostedFrom") else null,
+                )
+            } catch (e: JSONException) {
+                CallsState()
+            }
+        }
     }
 }

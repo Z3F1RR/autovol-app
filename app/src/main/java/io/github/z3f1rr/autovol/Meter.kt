@@ -39,8 +39,8 @@ class Meter(private val ctx: Context) {
     fun diagnostics(): String {
         val a = last ?: return "источник $sourceName, замеров ещё не было"
         return String.format(
-            java.util.Locale.ROOT, "источник %s, уровень %.1f дБ, смещение DC %.1f дБ, пик %d",
-            sourceName, a.db, a.dcDb, a.peak,
+            java.util.Locale.ROOT, "источник %s, уровень %.1f дБА (без фильтра %.1f дБ), смещение DC %.1f дБ, пик %d",
+            sourceName, a.db, a.flatDb, a.dcDb, a.peak,
         )
     }
 
@@ -63,7 +63,7 @@ class Meter(private val ctx: Context) {
                 return Measurement.Error("запись не началась (микрофон занят?)")
             }
             val total = RATE * recSec
-            val analyzer = LevelAnalyzer(skip = RATE * SKIP_MS / 1000)
+            val analyzer = LevelAnalyzer(skip = RATE * SKIP_MS / 1000, rate = RATE)
             val buf = ShortArray(RATE / 10)
             var got = 0
             var empty = 0
