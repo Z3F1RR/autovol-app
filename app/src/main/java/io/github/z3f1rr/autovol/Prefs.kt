@@ -93,8 +93,13 @@ class Prefs(context: Context) {
     /** Pure black background in the dark theme (AMOLED, OxygenOS look). */
     val pureBlack = stored({ sp.getBoolean("pure_black", true) }) { e, v -> e.putBoolean("pure_black", v) }
 
-    /** Accent: "SYSTEM" (device accent setting) / "WALLPAPER" (Material You). */
-    val accentSource = stored({ sp.getString("accent", "SYSTEM") ?: "SYSTEM" }) { e, v -> e.putString("accent", v) }
+    /** Accent: "SYSTEM" (device accent setting) / "CUSTOM" ([accentColor]). */
+    val accentSource = stored({ if (sp.getString("accent", "SYSTEM") == "CUSTOM") "CUSTOM" else "SYSTEM" }) { e, v ->
+        e.putString("accent", v)
+    }
+
+    /** Manually chosen accent, ARGB. */
+    val accentColor = stored({ sp.getInt("accent_color", 0xFF3D8BFF.toInt()) }) { e, v -> e.putInt("accent_color", v) }
 
     /** The user dismissed the "no autostart" hint (no root, nothing to do without a PC). */
     val accessHintDismissed = stored({ sp.getBoolean("access_hint_dismissed", false) }) { e, v ->

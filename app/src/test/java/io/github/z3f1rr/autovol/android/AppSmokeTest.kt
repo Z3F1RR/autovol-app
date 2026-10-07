@@ -85,7 +85,7 @@ class AppSmokeTest {
 
     @Test
     fun hintCanBeDismissedWithoutRoot() {
-        compose.onNodeWithText("Понятно").performClick()
+        compose.onNodeWithText("Скрыть").performClick()
         compose.onNodeWithText("Нет автозапуска после перезагрузки").assertDoesNotExist()
     }
 

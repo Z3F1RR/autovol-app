@@ -67,6 +67,6 @@ Android не даёт приложениям слушать микрофон в 
 
 ## Скриншоты
 
-<img src="docs/screenshots/main_dark_root.png" width="260"> <img src="docs/screenshots/main_light_noroot.png" width="260"> <img src="docs/screenshots/more_dark.png" width="260">
+<img src="docs/screenshots/main_fit_393x851.png" width="260"> <img src="docs/screenshots/main_dark_root.png" width="260"> <img src="docs/screenshots/more_dark.png" width="260">
 
 <img src="docs/screenshots/launcher_icon.png" width="400">

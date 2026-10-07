@@ -79,6 +79,8 @@ class ScreenshotTest {
     fun moreScreenDark() {
         AutoVol.prefs.themeMode.value = "DARK"
         AutoVol.prefs.pureBlack.value = false
+        AutoVol.prefs.accentSource.value = "CUSTOM"
+        AutoVol.prefs.accentColor.value = 0xFFFF6A00.toInt()
         AutoVol.prefs.rootGranted = true
         AutoVol.publish(Status(timeMs = 1_760_000_000_000, samples = 140, calWeight = 0.47, calFloor = -70.1, calTop = -46.1))
         val live = Live(mic = MicAccess.Level.BASIC, exactAlarms = false, batteryUnrestricted = true,

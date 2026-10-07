@@ -14,6 +14,15 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -144,7 +153,7 @@ fun MainScreen(onToggle: (Boolean) -> Unit, onOpenMore: () -> Unit, onRequestPho
     MainContent(live, onToggle, onOpenMore, onRequestPhone, refresh = { live = readLive(ctx) })
 }
 
-/** Stateless body, also rendered by the screenshot tests. */
+/** Stateless body, also rendered by the screenshot tests. Must fit one phone screen without scrolling. */
 @Composable
 fun MainContent(
     live: Live,
@@ -167,40 +176,36 @@ fun MainContent(
             .verticalScroll(rememberScrollState())
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+            .padding(horizontal = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Header(enabled, running, status, onOpenMore)
+        Header(enabled, running, status, onToggle, onOpenMore)
         // Root users always see the hint until it is fixed; others can dismiss it (nothing to do without a PC).
         if (!live.autoStart && (live.rootManager != null || !bannerDismissed)) AccessBanner(live, refresh)
         (update as? Updater.State.Available)?.let { UpdateBanner(it.release, onOpenMore) }
         HeroCard(enabled, running, status, live, pauseUntil, onToggle)
-        SectionLabel("Громкость")
-        VolumeSection(live)
-        SectionLabel("Звонки")
-        RepeatCallSection(live, onRequestPhone)
-        Spacer(Modifier.height(24.dp))
+        VolumeCard(live)
+        CallsCard(live, onRequestPhone)
+        Spacer(Modifier.height(4.dp))
     }
 }
 
 @Composable
 private fun UpdateBanner(rel: Updater.Release, onOpenMore: () -> Unit) {
-    OosCard(color = MaterialTheme.colorScheme.primaryContainer) {
+    CompactCard(color = MaterialTheme.colorScheme.primaryContainer) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Доступна версия ${rel.version}", style = MaterialTheme.typography.titleMedium)
-                Text("Обновление в разделе «Ещё»", color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
-            }
-            FilledTonalButton(onClick = onOpenMore) { Text("Открыть") }
+            Text("Доступна версия ${rel.version}", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+            TextButton(onClick = onOpenMore) { Text("Обновить") }
         }
     }
 }
 
+/** Title, status line, the main switch and the "Ещё" button in one row. */
 @Composable
-private fun Header(enabled: Boolean, running: Boolean, st: Status, onOpenMore: () -> Unit) {
-    Row(Modifier.fillMaxWidth().padding(top = 24.dp, bottom = 4.dp), verticalAlignment = Alignment.Bottom) {
+private fun Header(enabled: Boolean, running: Boolean, st: Status, onToggle: (Boolean) -> Unit, onOpenMore: () -> Unit) {
+    Row(Modifier.fillMaxWidth().padding(top = 8.dp, start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("AutoVol", style = MaterialTheme.typography.headlineLarge)
+            Text("AutoVol", style = MaterialTheme.typography.headlineMedium)
             Text(
                 when {
                     !enabled -> "Выключено"
@@ -209,18 +214,31 @@ private fun Header(enabled: Boolean, running: Boolean, st: Status, onOpenMore: (
                     else -> "Работает"
                 },
                 color = Oos.TextSecondary,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.bodySmall,
             )
         }
+        Switch(checked = enabled, onCheckedChange = onToggle)
         IconButton(onClick = onOpenMore) {
-            Icon(Icons.Filled.Settings, contentDescription = "Ещё: калибровка, система, обновления, журнал")
+            Icon(Icons.Filled.Settings, contentDescription = "Ещё: оформление, калибровка, система, обновления, журнал")
         }
     }
 }
 
+/** Card with tighter padding for the dense main screen. */
+@Composable
+private fun CompactCard(color: Color = Oos.Card, content: @Composable () -> Unit) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(22.dp))
+            .background(color)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) { content() }
+}
+
 /**
- * Top-of-screen check while AutoVol cannot start by itself after reboot. Root controls appear only
- * when a root manager is installed; others get the adb hint and can dismiss it.
+ * One-line hint while AutoVol cannot start by itself after reboot. Root controls appear only when a root
+ * manager is installed; others get the adb hint and can dismiss it.
  */
 @Composable
 private fun AccessBanner(live: Live, refresh: () -> Unit) {
@@ -230,28 +248,25 @@ private fun AccessBanner(live: Live, refresh: () -> Unit) {
     var result by remember { mutableStateOf<String?>(null) }
     var showAdb by remember { mutableStateOf(false) }
     val root = live.rootManager
-    OosCard(color = Oos.WarningBg) {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Нет автозапуска после перезагрузки", style = MaterialTheme.typography.titleMedium, color = Oos.Warning)
-            Text(
-                if (live.mic == MicAccess.Level.NONE) {
-                    "Нет разрешения на микрофон — включите автогромкость, чтобы его выдать."
-                } else {
-                    "Сейчас всё работает, но после перезагрузки AutoVol придётся запускать касанием уведомления."
-                },
-                color = Oos.TextPrimary,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            if (root != null) {
-                Text(
-                    "Обнаружен $root. Разрешите AutoVol в $root → Суперпользователь, затем нажмите кнопку.",
-                    color = Oos.TextSecondary,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (root != null) {
-                    Button(enabled = !busy, onClick = {
+    CompactCard(color = Oos.WarningBg) {
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Нет автозапуска после перезагрузки", style = MaterialTheme.typography.titleSmall, color = Oos.Warning)
+                    Text(
+                        when {
+                            live.mic == MicAccess.Level.NONE -> "Нет разрешения на микрофон"
+                            root != null -> "Разрешите AutoVol в $root"
+                            else -> "Запуск — касанием уведомления"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                when {
+                    busy -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                    root != null -> FilledTonalButton(onClick = {
                         busy = true
                         result = null
                         scope.launch {
@@ -260,23 +275,22 @@ private fun AccessBanner(live: Live, refresh: () -> Unit) {
                             result = r.output
                             refresh()
                         }
-                    }) { Text("Настроить через root") }
+                    }) { Text("Root") }
+                    else -> {
+                        TextButton(onClick = { showAdb = !showAdb }) { Text("adb") }
+                        TextButton(onClick = { AutoVol.prefs.accessHintDismissed.value = true }) { Text("Скрыть") }
+                    }
                 }
-                TextButton(onClick = { showAdb = !showAdb }) { Text(if (showAdb) "Скрыть adb" else "Через adb") }
-                if (root == null) {
-                    TextButton(onClick = { AutoVol.prefs.accessHintDismissed.value = true }) { Text("Понятно") }
-                }
-                if (busy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             }
-            result?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Oos.TextPrimary) }
+            result?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             if (showAdb) {
                 val cmd = MicAccess.adbCommand(ctx)
                 Text(
-                    "С компьютера (Android 11+ может сбрасывать это после перезагрузки):",
+                    "С компьютера; Android 11+ может сбрасывать это после перезагрузки:",
                     color = Oos.TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
                 )
-                SelectionContainer { Text(cmd, fontFamily = FontFamily.Monospace, fontSize = 12.sp, color = Oos.TextPrimary) }
+                SelectionContainer { Text(cmd, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
                 FilledTonalButton(onClick = { copyToClipboard(ctx, cmd) }) { Text("Копировать") }
             }
         }
@@ -292,28 +306,27 @@ private fun HeroCard(
     pauseUntil: Long,
     onToggle: (Boolean) -> Unit,
 ) {
-    OosCard {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Автогромкость", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Switch(checked = enabled, onCheckedChange = onToggle)
-            }
+    CompactCard {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             if (enabled && !running) {
-                FilledTonalButton(onClick = { onToggle(true) }) { Text("Возобновить") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Сервис остановлен", color = Oos.Warning, modifier = Modifier.weight(1f))
+                    FilledTonalButton(onClick = { onToggle(true) }) { Text("Возобновить") }
+                }
             }
-            Row(verticalAlignment = Alignment.Bottom) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     st.lastDb?.let { String.format(Locale.ROOT, "%.0f", it) } ?: "—",
-                    style = MaterialTheme.typography.displayMedium,
+                    style = MaterialTheme.typography.displaySmall,
                 )
-                Text(" дБА", color = Oos.TextSecondary, modifier = Modifier.padding(bottom = 12.dp))
+                Text(" дБА", color = Oos.TextSecondary, modifier = Modifier.padding(top = 10.dp))
                 Spacer(Modifier.weight(1f))
-                Column(horizontalAlignment = Alignment.End, modifier = Modifier.padding(bottom = 10.dp)) {
+                Column(horizontalAlignment = Alignment.End) {
                     Text(
                         if (st.step != null) "ступень ${st.step} из ${st.steps}" else "ступень —",
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    st.pct?.let { Text("$it%", color = MaterialTheme.colorScheme.primary) }
+                    st.pct?.let { Text("$it%", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium) }
                 }
             }
             StepBar(st.step, st.steps)
@@ -322,25 +335,25 @@ private fun HeroCard(
                     st.note,
                     color = if (st.paused) Oos.Warning else Oos.TextSecondary,
                     style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                 VolumeChip("Звонок", live.ring, live.ringMax, Modifier.weight(1f))
                 VolumeChip("Уведомл.", live.notif, live.notifMax, Modifier.weight(1f))
                 VolumeChip("Медиа", live.media, live.mediaMax, Modifier.weight(1f))
-            }
-            if (enabled) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FilledTonalButton(onClick = { AutoVolService.instance?.requestCycle(diag = true) }) {
-                        Text("Проверить сейчас")
-                    }
-                    if (pauseUntil > System.currentTimeMillis()) {
-                        TextButton(onClick = {
-                            AutoVol.prefs.pauseUntilMs = 0
-                            AutoVolService.instance?.requestCycle()
-                        }) { Text("Снять паузу") }
+                if (enabled) {
+                    FilledTonalIconButton(onClick = { AutoVolService.instance?.requestCycle(diag = true) }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Проверить сейчас")
                     }
                 }
+            }
+            if (pauseUntil > System.currentTimeMillis()) {
+                TextButton(onClick = {
+                    AutoVol.prefs.pauseUntilMs = 0
+                    AutoVolService.instance?.requestCycle()
+                }) { Text("Снять паузу") }
             }
         }
     }
@@ -355,7 +368,7 @@ private fun StepBar(step: Int?, steps: Int) {
             Box(
                 Modifier
                     .weight(1f)
-                    .height(6.dp)
+                    .height(5.dp)
                     .clip(CircleShape)
                     .background(if (on) MaterialTheme.colorScheme.primary else Oos.CardHigh),
             )
@@ -367,165 +380,158 @@ private fun StepBar(step: Int?, steps: Int) {
 private fun VolumeChip(label: String, v: Int, max: Int, modifier: Modifier) {
     Column(
         modifier
-            .clip(RoundedCornerShape(16.dp))
+            .clip(RoundedCornerShape(14.dp))
             .background(Oos.CardHigh)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 6.dp),
     ) {
-        Text(label, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
-        Text("$v/$max", style = MaterialTheme.typography.titleMedium)
+        Text(label, color = Oos.TextSecondary, style = MaterialTheme.typography.labelSmall)
+        Text("$v/$max", style = MaterialTheme.typography.titleSmall)
     }
 }
 
-/** Long integer sliders: hide the tick dots, the value is shown as text. */
+private fun sensText(v: Int) = if (v == 0) "обычная" else if (v > 0) "+$v" else "$v"
+
+/** Label, slider and value in a single row. */
 @Composable
-private fun SensitivitySlider(title: String, subtitle: String, value: Int, enabled: Boolean = true, onDone: (Int) -> Unit) {
-    var v by remember(value) { mutableFloatStateOf(value.toFloat()) }
-    val max = EngineSettings.SENS_MAX
-    Column {
-        Row {
-            Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-            val iv = v.toInt()
-            Text(
-                if (iv == 0) "обычная" else (if (iv > 0) "+$iv" else "$iv"),
-                color = if (enabled) MaterialTheme.colorScheme.primary else Oos.TextSecondary,
-            )
-        }
-        Text(subtitle, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
+private fun SliderRow(
+    label: String,
+    valueText: String,
+    value: Float,
+    range: ClosedFloatingPointRange<Float>,
+    steps: Int,
+    ticks: Boolean,
+    onChange: (Float) -> Unit,
+    onDone: () -> Unit,
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.width(96.dp))
         Slider(
-            value = v,
-            onValueChange = { v = Math.round(it).toFloat() },
-            onValueChangeFinished = { onDone(v.toInt()) },
-            valueRange = -max.toFloat()..max.toFloat(),
-            steps = 2 * max - 1,
-            enabled = enabled,
+            value = value,
+            onValueChange = onChange,
+            onValueChangeFinished = onDone,
+            valueRange = range,
+            steps = steps,
+            colors = if (ticks) SliderDefaults.colors() else noTicks(),
+            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
         )
-        Row {
-            Text("тише", color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
-            Text("громче", color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall)
-        }
+        Text(
+            valueText,
+            color = MaterialTheme.colorScheme.primary,
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.End,
+            modifier = Modifier.width(64.dp),
+        )
     }
 }
 
+/** -3..+3 sensitivity in one row; [onDone] stores the value. */
 @Composable
-private fun VolumeSection(live: Live) {
+private fun SensitivityRow(label: String, value: Int, onDone: (Int) -> Unit) {
+    var v by remember(value) { mutableFloatStateOf(value.toFloat()) }
+    val max = EngineSettings.SENS_MAX.toFloat()
+    SliderRow(label, sensText(v.toInt()), v, -max..max, 2 * EngineSettings.SENS_MAX - 1, ticks = true,
+        onChange = { v = Math.round(it).toFloat() }, onDone = { onDone(v.toInt()) })
+}
+
+@Composable
+private fun VolumeCard(live: Live) {
     val minVol by AutoVol.prefs.minVolFlow.collectAsStateWithLifecycle()
     val ringSens by AutoVol.prefs.ringSensFlow.collectAsStateWithLifecycle()
     val mediaOn by AutoVol.prefs.mediaEnabledFlow.collectAsStateWithLifecycle()
     val mediaSens by AutoVol.prefs.mediaSensFlow.collectAsStateWithLifecycle()
+    var ringOpen by rememberSaveable { mutableStateOf(false) }
     val max = live.ringMax.coerceAtLeast(2)
     var value by remember(minVol) { mutableFloatStateOf(minVol.coerceIn(1, max).toFloat()) }
-    OosCard {
+    CompactCard {
         Column {
-            Row {
-                Text("Минимальная громкость", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Text("${value.toInt()} из $max", color = MaterialTheme.colorScheme.primary)
-            }
-            Text(
-                "Звонок и уведомления в тишине. Никогда не 0 — иначе включится вибро.",
-                color = Oos.TextSecondary,
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Slider(
-                value = value,
-                onValueChange = { value = it },
-                onValueChangeFinished = {
+            SliderRow("В тишине", "${value.toInt()} из $max", value, 1f..max.toFloat(), (max - 2).coerceAtLeast(0), ticks = false,
+                onChange = { value = it },
+                onDone = {
                     AutoVol.prefs.minVol = value.toInt()
                     AutoVolService.instance?.requestCycle()
-                },
-                valueRange = 1f..max.toFloat(),
-                steps = (max - 2).coerceAtLeast(0),
-                colors = noTicks(),
-            )
-            RowDivider()
-            SensitivitySlider(
-                "Чувствительность: звонок и уведомления",
-                "Выше — громкость растёт уже при небольшом шуме (каждое деление ≈ 3 дБ).",
-                ringSens,
+                })
+            // Ringer sensitivity is rarely changed: behind a tap.
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { ringOpen = !ringOpen }.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                AutoVol.prefs.ringSens = it
-                AutoVolService.instance?.requestCycle()
+                Text("Чувствительность звонка", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Text(sensText(ringSens) + if (ringOpen) "  ▴" else "  ▾", color = MaterialTheme.colorScheme.primary)
             }
-            RowDivider()
-            SwitchRow(
-                "Мультимедиа автоматически",
-                "Громкость медиа следует за шумом. Если медиа выключено (0) или выкручено на максимум вами — не трогается.",
-                mediaOn,
-            ) {
+            if (ringOpen) {
+                SensitivityRow("Звонок", ringSens) {
+                    AutoVol.prefs.ringSens = it
+                    AutoVolService.instance?.requestCycle()
+                }
+            }
+            HorizontalDivider(color = Oos.Divider, modifier = Modifier.padding(vertical = 6.dp))
+            CompactSwitchRow("Мультимедиа автоматически", "0 и ваш максимум не трогаются", mediaOn) {
                 AutoVol.prefs.mediaEnabled = it
                 AutoVolService.instance?.requestCycle()
             }
-            Spacer(Modifier.height(12.dp))
-            SensitivitySlider(
-                "Чувствительность: мультимедиа",
-                "Сдвиг медиа относительно звонка, в ступенях.",
-                mediaSens,
-                enabled = mediaOn,
-            ) {
-                AutoVol.prefs.mediaSens = it
-                AutoVolService.instance?.requestCycle()
+            if (mediaOn) {
+                SensitivityRow("Медиа", mediaSens) {
+                    AutoVol.prefs.mediaSens = it
+                    AutoVolService.instance?.requestCycle()
+                }
             }
         }
     }
 }
 
 @Composable
-private fun RepeatCallSection(live: Live, onRequestPhone: (sameNumber: Boolean) -> Unit) {
+private fun CompactSwitchRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f).padding(end = 8.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = Oos.TextSecondary, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun CallsCard(live: Live, onRequestPhone: (sameNumber: Boolean) -> Unit) {
     val s by AutoVol.prefs.repeatFlow.collectAsStateWithLifecycle()
     var window by remember(s.windowMin) { mutableFloatStateOf(s.windowMin.toFloat()) }
     val same = s.mode == RepeatMode.SAME_NUMBER
-    OosCard {
+    CompactCard {
         Column {
-            SwitchRow(
-                "Повторный звонок — на максимум",
-                "Звонят снова после пропущенного — звонок звучит на полной громкости. В вибро не срабатывает.",
-                s.enabled,
-            ) {
+            CompactSwitchRow("Повторный звонок на максимум", "Звонят снова после пропущенного", s.enabled) {
                 AutoVol.prefs.repeat = s.copy(enabled = it)
                 if (it) onRequestPhone(same)
             }
             if (s.enabled) {
-                RowDivider()
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = same, onClick = {
-                        AutoVol.prefs.repeat = s.copy(mode = RepeatMode.SAME_NUMBER)
-                        onRequestPhone(true)
-                    })
-                    Text("С того же номера")
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                    SegmentedButton(
+                        selected = same,
+                        onClick = {
+                            AutoVol.prefs.repeat = s.copy(mode = RepeatMode.SAME_NUMBER)
+                            onRequestPhone(true)
+                        },
+                        shape = SegmentedButtonDefaults.itemShape(0, 2),
+                    ) { Text("Тот же номер") }
+                    SegmentedButton(
+                        selected = !same,
+                        onClick = { AutoVol.prefs.repeat = s.copy(mode = RepeatMode.ANY_NUMBER) },
+                        shape = SegmentedButtonDefaults.itemShape(1, 2),
+                    ) { Text("Любой номер") }
                 }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(selected = !same, onClick = { AutoVol.prefs.repeat = s.copy(mode = RepeatMode.ANY_NUMBER) })
-                    Text("С любого номера")
-                }
-                RowDivider()
-                Row {
-                    Text("Учитывать пропущенный", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                    Text("до ${window.toInt()} мин", color = MaterialTheme.colorScheme.primary)
-                }
-                Text(
-                    "Повтор срабатывает сразу, без минимальной паузы; старше этого — игнорируется.",
-                    color = Oos.TextSecondary,
-                    style = MaterialTheme.typography.bodySmall,
-                )
-                Slider(
-                    value = window,
-                    onValueChange = { window = Math.round(it).toFloat() },
-                    onValueChangeFinished = { AutoVol.prefs.repeat = s.copy(windowMin = window.toInt()) },
-                    valueRange = 1f..30f,
-                    steps = 28,
-                    colors = noTicks(),
-                )
+                SliderRow("Окно", "${window.toInt()} мин", window, 1f..30f, 28, ticks = false,
+                    onChange = { window = Math.round(it).toFloat() },
+                    onDone = { AutoVol.prefs.repeat = s.copy(windowMin = window.toInt()) })
                 val missing = when {
-                    !live.phoneState -> "Нет разрешения «Телефон» — функция не работает."
-                    same && !live.callLog -> "Нет доступа к журналу вызовов — номер не виден, «с того же номера» не сработает."
+                    !live.phoneState -> "Нет разрешения «Телефон»"
+                    same && !live.callLog -> "Нет доступа к журналу вызовов — номер не виден"
                     else -> null
                 }
                 if (missing != null) {
-                    Text(missing, color = Oos.Warning, style = MaterialTheme.typography.bodySmall)
-                    FilledTonalButton(onClick = { onRequestPhone(same) }) { Text("Выдать разрешение") }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(missing, color = Oos.Warning, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                        TextButton(onClick = { onRequestPhone(same) }) { Text("Выдать") }
+                    }
                 }
             }
         }
     }
 }
-
-

@@ -5,6 +5,15 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -96,21 +105,57 @@ private fun AppearanceSection() {
     val mode by prefs.themeMode.flow.collectAsStateWithLifecycle()
     val black by prefs.pureBlack.flow.collectAsStateWithLifecycle()
     val accent by prefs.accentSource.flow.collectAsStateWithLifecycle()
+    val custom by prefs.accentColor.flow.collectAsStateWithLifecycle()
     OosCard {
         Column {
             Text("Тема", style = MaterialTheme.typography.titleMedium)
-            RadioRow("Как в системе", mode == "SYSTEM") { prefs.themeMode.value = "SYSTEM" }
-            RadioRow("Светлая", mode == "LIGHT") { prefs.themeMode.value = "LIGHT" }
-            RadioRow("Тёмная", mode == "DARK") { prefs.themeMode.value = "DARK" }
-            RowDivider()
-            SwitchRow("Чёрный фон", "В тёмной теме — полностью чёрный (AMOLED), как в OxygenOS", black) {
-                prefs.pureBlack.value = it
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                listOf("SYSTEM" to "Системная", "LIGHT" to "Светлая", "DARK" to "Тёмная").forEachIndexed { i, (key, label) ->
+                    SegmentedButton(
+                        selected = mode == key,
+                        onClick = { prefs.themeMode.value = key },
+                        shape = SegmentedButtonDefaults.itemShape(i, 3),
+                    ) { Text(label) }
+                }
+            }
+            // Black only matters where a dark theme can appear.
+            if (mode != "LIGHT") {
+                Spacer(Modifier.height(8.dp))
+                SwitchRow("Чёрный фон", "Тёмная тема полностью чёрная (AMOLED)", black) { prefs.pureBlack.value = it }
             }
             RowDivider()
             Text("Цвет акцента", style = MaterialTheme.typography.titleMedium)
-            RadioRow("Системный (настройки → Цвета)", accent == "SYSTEM") { prefs.accentSource.value = "SYSTEM" }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                RadioRow("Из обоев (Material You)", accent == "WALLPAPER") { prefs.accentSource.value = "WALLPAPER" }
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 8.dp)) {
+                SegmentedButton(
+                    selected = accent == "SYSTEM",
+                    onClick = { prefs.accentSource.value = "SYSTEM" },
+                    shape = SegmentedButtonDefaults.itemShape(0, 2),
+                ) { Text("Из системы") }
+                SegmentedButton(
+                    selected = accent == "CUSTOM",
+                    onClick = { prefs.accentSource.value = "CUSTOM" },
+                    shape = SegmentedButtonDefaults.itemShape(1, 2),
+                ) { Text("Свой") }
+            }
+            if (accent == "CUSTOM") {
+                AccentSwatches.chunked(5).forEach { row ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        row.forEach { argb ->
+                            val selected = argb == custom
+                            Box(
+                                Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(argb))
+                                    .border(if (selected) 3.dp else 0.dp, Oos.TextPrimary, CircleShape)
+                                    .clickable { prefs.accentColor.value = argb },
+                            )
+                        }
+                    }
+                }
             }
         }
     }

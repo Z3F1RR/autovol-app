@@ -110,6 +110,20 @@ fun systemAccent(ctx: Context, dark: Boolean): Color? {
     }
 }
 
+/** Material You primary as the fallback system accent (Android 12+). */
+private fun wallpaperAccent(ctx: Context, dark: Boolean): Color =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        (if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)).primary
+    } else {
+        FallbackAccent
+    }
+
+/** Swatches for a manual accent: OnePlus red, warm, green, blue, violet, pink and neutral. */
+val AccentSwatches = listOf(
+    0xFFEB0028, 0xFFFF6A00, 0xFFFFB300, 0xFF34C759, 0xFF00BFA5,
+    0xFF3D8BFF, 0xFF5E5CE6, 0xFFAF52DE, 0xFFFF2D7A, 0xFFB0B0B0,
+).map { it.toInt() }
+
 /** Keeps the accent readable: no near-black accent on black, no near-white accent on white. */
 fun readableAccent(accent: Color, dark: Boolean): Color = when {
     dark && accent.luminance() < 0.12f -> lerp(accent, Color.White, 0.45f)
@@ -153,12 +167,10 @@ fun AutoVolTheme(content: @Composable () -> Unit) {
     val dark = isAppInDarkTheme()
     val black by AutoVol.prefs.pureBlack.flow.collectAsStateWithLifecycle()
     val accentSource by AutoVol.prefs.accentSource.flow.collectAsStateWithLifecycle()
+    val customAccent by AutoVol.prefs.accentColor.flow.collectAsStateWithLifecycle()
     val c = if (dark) OosColors.dark(black) else OosColors.light()
-    val base = if (accentSource == "WALLPAPER" && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        if (dark) dynamicDarkColorScheme(ctx) else dynamicLightColorScheme(ctx)
-    } else {
-        schemeFromAccent(readableAccent(systemAccent(ctx, dark) ?: FallbackAccent, dark), c)
-    }
+    val accent = if (accentSource == "CUSTOM") Color(customAccent) else systemAccent(ctx, dark) ?: wallpaperAccent(ctx, dark)
+    val base = schemeFromAccent(readableAccent(accent, dark), c)
     val scheme = base.copy(
         background = c.background,
         onBackground = c.textPrimary,
