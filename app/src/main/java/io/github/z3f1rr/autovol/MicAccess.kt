@@ -47,5 +47,6 @@ object MicAccess {
         }
     }
 
-    fun adbCommand(ctx: Context) = "adb shell appops set ${ctx.packageName} RECORD_AUDIO allow"
+    /** --uid: the per-UID mode set by the permission service overrides the per-package one. */
+    fun adbCommand(ctx: Context) = "adb shell appops set --uid ${ctx.packageName} RECORD_AUDIO allow"
 }

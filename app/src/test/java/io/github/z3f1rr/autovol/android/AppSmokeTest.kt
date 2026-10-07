@@ -52,7 +52,7 @@ class AppSmokeTest {
 
     @After
     fun tearDown() {
-        Root.su = "su"
+        Root.su = null
     }
 
     private fun grantMic() = shadowOf(app).grantPermissions(Manifest.permission.RECORD_AUDIO)
@@ -185,10 +185,24 @@ class AppSmokeTest {
         su.setExecutable(true)
         Root.su = su.path
         Root.grantAll(app)
-        val cmds = log.readText()
-        assertTrue(cmds, cmds.contains("appops set ${app.packageName} RECORD_AUDIO allow"))
-        assertTrue(cmds, cmds.contains("dumpsys deviceidle whitelist +${app.packageName}"))
+        val cmds = log.readLines()
+        val uidCmd = "appops set --uid ${app.packageName} RECORD_AUDIO allow"
+        assertTrue(cmds.toString(), uidCmd in cmds)
+        assertTrue(cmds.toString(), "dumpsys deviceidle whitelist +${app.packageName}" in cmds)
+        // every pm grant resets the mic op, so the appops must come after all of them
+        assertTrue(cmds.toString(), cmds.indexOf(uidCmd) > cmds.indexOfLast { it.startsWith("pm grant") })
         assertTrue(AutoVol.prefs.rootGranted)
+        // not full yet (the fake su changes nothing): the log explains the uid/package modes
+        assertTrue(AutoVol.log.text(), AutoVol.log.text().contains("uid:"))
+    }
+
+    @Test
+    fun reapplyWithoutPriorRootDoesNothing() {
+        Root.su = "/nonexistent/su"
+        grantMic()
+        setMicOp(AppOpsManager.MODE_FOREGROUND)
+        Root.reapplyIfNeeded(app, force = true)
+        assertFalse(AutoVol.log.text().contains("root:"))
     }
 
     @Test

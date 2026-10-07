@@ -127,6 +127,7 @@ class AutoVolService : Service() {
 
     private fun runCycle() {
         CallReceiver.restoreIfStale(this)
+        Root.reapplyIfNeeded(this)
         val settings = AutoVol.prefs.settings()
         val engine = AutoVol.engine
         val r = try {

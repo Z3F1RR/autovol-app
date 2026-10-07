@@ -59,7 +59,7 @@ class BootReceiver : BroadcastReceiver() {
             val pending = goAsync()
             Thread {
                 try {
-                    Root.grantAll(context)
+                    Root.reapplyIfNeeded(context, force = true)
                     AutoVolService.startFromBackground(context, why)
                 } finally {
                     pending.finish()

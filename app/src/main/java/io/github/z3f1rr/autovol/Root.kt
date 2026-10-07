@@ -33,12 +33,46 @@ object Root {
         }
     }?.second
 
-    /** su binary; replaced by a fake script in tests. */
+    /** su binary forced by tests; null = find it ([CANDIDATES]). */
     @Volatile
-    internal var su = "su"
+    internal var su: String? = null
 
-    fun run(cmd: String, timeoutSec: Long = 15): Result = try {
-        val p = ProcessBuilder(su, "-c", cmd).redirectErrorStream(true).start()
+    @Volatile
+    private var resolved: String? = null
+
+    /**
+     * Where root managers expose su to apps: KernelSU / KernelSU Next / SukiSU and APatch hook
+     * /system/bin/su for allowed apps, Magisk mounts it in /system/bin or /sbin (older) or
+     * /debug_ramdisk. "su" first: whatever PATH finds.
+     */
+    private val CANDIDATES = listOf(
+        "su", "/system/bin/su", "/system/xbin/su", "/sbin/su", "/debug_ramdisk/su", "/su/bin/su",
+        "/data/adb/ksu/bin/su", "/data/adb/ap/bin/su",
+    )
+
+    /** Last attempt to re-apply the grant from a cycle; limits su calls. */
+    @Volatile
+    private var lastReapplyMs = 0L
+
+    fun run(cmd: String, timeoutSec: Long = 15): Result {
+        su?.let { return exec(it, cmd, timeoutSec) }
+        resolved?.let { return exec(it, cmd, timeoutSec) }
+        var last = Result(false, "su не найден")
+        for (bin in CANDIDATES) {
+            val r = exec(bin, cmd, timeoutSec)
+            if (r.output != NOT_FOUND) {
+                resolved = bin
+                return r
+            }
+            last = r
+        }
+        return last.copy(output = "su не найден")
+    }
+
+    private const val NOT_FOUND = "\u0000not found"
+
+    private fun exec(bin: String, cmd: String, timeoutSec: Long): Result = try {
+        val p = ProcessBuilder(bin, "-c", cmd).redirectErrorStream(true).start()
         val out = StringBuilder()
         val reader = Thread {
             try {
@@ -55,18 +89,31 @@ object Root {
             Result(p.exitValue() == 0, out.toString().trim())
         }
     } catch (e: IOException) {
-        Result(false, "su не найден")
+        Result(false, NOT_FOUND)
     }
 
-    /** Commands that turn on full access: background mic, permissions, exact alarms, no battery limits. */
+    /**
+     * Background microphone. RECORD_AUDIO is a runtime-permission op: the permission service keeps a
+     * per-UID mode ("foreground") that overrides the per-package mode, so the UID mode must be set.
+     * The package mode is set too for older Android versions.
+     */
+    fun micCommands(ctx: Context): List<String> {
+        val pkg = ctx.packageName
+        return listOf("appops set --uid $pkg RECORD_AUDIO allow", "appops set $pkg RECORD_AUDIO allow")
+    }
+
+    /**
+     * Commands that turn on full access. Every `pm grant` makes the permission service re-sync the
+     * app's ops and reset RECORD_AUDIO back to "foreground", so the appops go last.
+     */
     fun grantCommands(ctx: Context): List<String> {
         val pkg = ctx.packageName
         return buildList {
             add("pm grant $pkg android.permission.RECORD_AUDIO")
-            add("appops set $pkg RECORD_AUDIO allow")
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add("pm grant $pkg android.permission.POST_NOTIFICATIONS")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add("appops set $pkg SCHEDULE_EXACT_ALARM allow")
             add("dumpsys deviceidle whitelist +$pkg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add("appops set $pkg SCHEDULE_EXACT_ALARM allow")
+            addAll(micCommands(ctx))
         }
     }
 
@@ -75,11 +122,12 @@ object Root {
      * the grant is remembered so it can be re-applied after reboot.
      */
     fun grantAll(ctx: Context): Result {
-        val id = run("id")
+        // Magisk asks the user on the first call: give them time to answer.
+        val id = run("id", timeoutSec = 60)
         if (!id.ok || "uid=0" !in id.output) {
             val manager = managerName(ctx)
             val hint = if (manager != null) {
-                "Разрешите AutoVol в $manager → Суперпользователь и повторите."
+                "Root не выдан: разрешите AutoVol в $manager → Суперпользователь и повторите."
             } else {
                 "Root не найден."
             }
@@ -91,9 +139,36 @@ object Root {
             if (r.ok) null else "$cmd: ${r.output.take(80)}"
         }
         AutoVol.prefs.rootGranted = true
-        val level = MicAccess.level(ctx)
-        val msg = if (level == MicAccess.Level.FULL) "Полный доступ выдан через root." else "Root есть, но доступ: ${MicAccess.rawMode(ctx)}"
+        return report(ctx, "выдан", failed)
+    }
+
+    /**
+     * The permission service puts RECORD_AUDIO back to "foreground" after reboot and after any
+     * permission change. With root, quietly restore it (at most every 10 minutes). Worker thread only.
+     */
+    fun reapplyIfNeeded(ctx: Context, force: Boolean = false) {
+        if (!AutoVol.prefs.rootGranted || MicAccess.level(ctx) == MicAccess.Level.FULL) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastReapplyMs < 10 * 60_000L) return
+        lastReapplyMs = now
+        val failed = micCommands(ctx).mapNotNull { cmd ->
+            val r = run(cmd)
+            if (r.ok) null else "$cmd: ${r.output.take(80)}"
+        }
+        report(ctx, "восстановлен (система сбросила режим)", failed)
+    }
+
+    private fun report(ctx: Context, what: String, failed: List<String>): Result {
+        val full = MicAccess.level(ctx) == MicAccess.Level.FULL
+        val msg = if (full) {
+            "Полный доступ $what через root."
+        } else {
+            val pkg = ctx.packageName
+            val uidMode = run("appops get --uid $pkg RECORD_AUDIO").output.take(120)
+            val pkgMode = run("appops get $pkg RECORD_AUDIO").output.take(120)
+            "Root есть, но доступ: ${MicAccess.rawMode(ctx)} (uid: $uidMode; пакет: $pkgMode)"
+        }
         AutoVol.log.add("root: $msg" + if (failed.isNotEmpty()) " Ошибки: ${failed.joinToString("; ")}" else "")
-        return Result(level == MicAccess.Level.FULL, msg)
+        return Result(full, msg)
     }
 }
