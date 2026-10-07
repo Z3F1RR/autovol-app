@@ -1,0 +1,3 @@
+• More detailed noise chart: time, level and the exact value on tap.
+• Media volume now also remembers when you change it yourself.
+• Small fixes.

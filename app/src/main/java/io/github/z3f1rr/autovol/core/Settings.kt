@@ -48,5 +48,7 @@ data class Settings(
         const val SENS_DB_PER_NOTCH = 3.0
         const val LEARN_STEP_DB = 1.5
         const val LEARN_MAX_DB = 9.0
+        const val MEDIA_LEARN_STEP_PCT = 5.0
+        const val MEDIA_LEARN_MAX_PCT = 30.0
     }
 }

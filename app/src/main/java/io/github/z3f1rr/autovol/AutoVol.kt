@@ -39,6 +39,12 @@ object AutoVol {
                         prefs.learnedBias.value = biasDb
                     }
                 },
+                mediaBiasStore = object : BiasStore {
+                    override fun load() = prefs.learnedMediaPct.value
+                    override fun save(biasDb: Double) {
+                        prefs.learnedMediaPct.value = biasDb
+                    }
+                },
             ).also { engineInstance = it }
         }
 

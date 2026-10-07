@@ -141,8 +141,9 @@
     <string name="resume_title">Автогромкость остановлена</string>
     <string name="resume_text">Нажмите, чтобы возобновить</string>
     <string name="learn_title">Учитывать мои изменения</string>
-    <string name="learn_sub">Если вы часто прибавляете или убавляете звонок, AutoVol подстроится</string>
-    <string name="learn_value">Учтено: %1$s дБ, %2$s</string>
+    <string name="learn_sub">Если вы часто прибавляете или убавляете звонок или мультимедиа, AutoVol подстроится</string>
+    <string name="learn_value">Звонок: %1$s дБ, %2$s</string>
+    <string name="learn_media_value">Мультимедиа: %1$s%%, %2$s</string>
     <string name="learn_louder">громче</string>
     <string name="learn_quieter">тише</string>
     <string name="learn_none">Пока ничего не учтено</string>
@@ -152,5 +153,6 @@
     <string name="accent_sat">Насыщенность</string>
     <string name="accent_val">Яркость</string>
     <string name="chart_hours">Последние %1$d ч</string>
+    <string name="chart_desc">График уровня шума, от %1$s до %2$s %3$s. Коснитесь, чтобы узнать значение</string>
     <string name="chart_empty">График появится после первых замеров</string>
 </resources>

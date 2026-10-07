@@ -1,6 +1,6 @@
 package io.github.z3f1rr.autovol.core
 
-/** Persists the threshold correction learned from the user's manual volume changes (dB). */
+/** Persists a correction learned from the user's manual volume changes (ringer: dB, media: %). */
 interface BiasStore {
     fun load(): Double
     fun save(biasDb: Double)
@@ -23,4 +23,9 @@ object Learning {
     fun next(biasDb: Double, direction: Int): Double =
         (biasDb + direction.coerceIn(-1, 1) * Settings.LEARN_STEP_DB)
             .coerceIn(-Settings.LEARN_MAX_DB, Settings.LEARN_MAX_DB)
+
+    /** Same for media: the media percentage moves by [Settings.MEDIA_LEARN_STEP_PCT] per correction. */
+    fun nextMedia(biasPct: Double, direction: Int): Double =
+        (biasPct + direction.coerceIn(-1, 1) * Settings.MEDIA_LEARN_STEP_PCT)
+            .coerceIn(-Settings.MEDIA_LEARN_MAX_PCT, Settings.MEDIA_LEARN_MAX_PCT)
 }

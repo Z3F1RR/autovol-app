@@ -402,7 +402,65 @@ class EngineTest {
         p.advanceSec(30 * 60)
         p.queue(-35.0)
         cycle(ms)
+        assertEquals(1 + Math.rint(29 * 0.55).toInt(), p.media()) // 50% + the learned 5%
+    }
+
+    /** One cycle of [eng] at a steady [db] (enough measurements for a confirmation). */
+    private fun runAt(eng: Engine, settings: Settings, db: Double) {
+        p.queue(db, db)
+        eng.cycle(settings)
+        p.measurements.clear()
+    }
+
+    @Test
+    fun manualMediaChangesAreLearned() {
+        val mediaBias = MemoryBiasStore()
+        val eng = Engine(p, History(store), mediaBiasStore = mediaBias)
+        val ms = s.copy(mediaEnabled = true)
+        runAt(eng, ms, -35.0) // step 2: media 15 of 30
         assertEquals(15, p.media())
+        p.userSetsMedia(10) // too loud for the user
+        runAt(eng, ms, -35.0)
+        assertEquals(10, p.media())
+        assertEquals(-Settings.MEDIA_LEARN_STEP_PCT, eng.state.learnedMediaPct, 0.0)
+        assertEquals(-Settings.MEDIA_LEARN_STEP_PCT, mediaBias.value, 0.0)
+        assertEquals(0.0, eng.state.learnedBiasDb, 0.0) // the ringer is not affected
+        assertTrue(p.logs.any { it.contains("мультимедиа изменена вручную 15→10, учтено (тише)") })
+        p.advanceSec(31 * 60)
+        runAt(eng, ms, -35.0)
+        assertEquals(1 + Math.rint(29 * 0.45).toInt(), p.media()) // 50% − 5%
+        eng.resetLearning()
+        assertEquals(0.0, mediaBias.value, 0.0)
+    }
+
+    @Test
+    fun mediaMuteOrMaximumIsNotLearnedAndLearningIsClamped() {
+        val eng = Engine(p, History(store), mediaBiasStore = MemoryBiasStore(28.0))
+        val ms = s.copy(mediaEnabled = true)
+        runAt(eng, ms, -60.0)
+        p.userSetsMedia(0)
+        runAt(eng, ms, -60.0)
+        assertEquals(28.0, eng.state.learnedMediaPct, 0.0)
+        p.advanceSec(31 * 60)
+        p.userSetsMedia(5)
+        runAt(eng, ms, -60.0)
+        p.userSetsMedia(30)
+        runAt(eng, ms, -60.0)
+        assertEquals(28.0, eng.state.learnedMediaPct, 0.0)
+        p.advanceSec(31 * 60)
+        p.userSetsMedia(5)
+        runAt(eng, ms, -60.0)
+        p.userSetsMedia(p.media() + 3)
+        runAt(eng, ms, -60.0)
+        assertEquals(Settings.MEDIA_LEARN_MAX_PCT, eng.state.learnedMediaPct, 0.0)
+        // disabled: still respected as manual, nothing learned
+        val off = ms.copy(learnFromManual = false)
+        p.advanceSec(31 * 60)
+        runAt(eng, off, -60.0)
+        p.userSetsMedia(p.media() - 3)
+        runAt(eng, off, -60.0)
+        assertEquals(Settings.MEDIA_LEARN_MAX_PCT, eng.state.learnedMediaPct, 0.0)
+        assertTrue(p.logs.count { it.startsWith("громкость мультимедиа изменена вручную") } >= 3)
     }
 
     @Test

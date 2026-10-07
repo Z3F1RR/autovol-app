@@ -145,8 +145,9 @@
     <string name="resume_title">Auto volume stopped</string>
     <string name="resume_text">Tap to resume</string>
     <string name="learn_title">Learn from my changes</string>
-    <string name="learn_sub">If you often turn the ringer up or down, AutoVol adjusts to it</string>
-    <string name="learn_value">Learned: %1$s dB, %2$s</string>
+    <string name="learn_sub">If you often turn the ringer or media up or down, AutoVol adjusts to it</string>
+    <string name="learn_value">Ringer: %1$s dB, %2$s</string>
+    <string name="learn_media_value">Media: %1$s%%, %2$s</string>
     <string name="learn_louder">louder</string>
     <string name="learn_quieter">quieter</string>
     <string name="learn_none">Nothing learned yet</string>
@@ -156,5 +157,6 @@
     <string name="accent_sat">Saturation</string>
     <string name="accent_val">Brightness</string>
     <string name="chart_hours">Last %1$d h</string>
+    <string name="chart_desc">Noise level chart, from %1$s to %2$s %3$s. Touch to see a value</string>
     <string name="chart_empty">The chart appears after the first measurements</string>
 </resources>

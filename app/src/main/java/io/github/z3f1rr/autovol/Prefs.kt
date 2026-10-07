@@ -107,6 +107,9 @@ class Prefs(context: Context) {
     /** Correction learned from manual changes, dB (observable for the UI, stored by the engine). */
     val learnedBias = stored({ sp.getFloat("learned_bias", 0f).toDouble() }) { e, v -> e.putFloat("learned_bias", v.toFloat()) }
 
+    /** Correction learned from manual media changes, % of the range. */
+    val learnedMediaPct = stored({ sp.getFloat("learned_media_pct", 0f).toDouble() }) { e, v -> e.putFloat("learned_media_pct", v.toFloat()) }
+
     /** The user dismissed the "no autostart" hint (no root, nothing to do without a PC). */
     val accessHintDismissed = stored({ sp.getBoolean("access_hint_dismissed", false) }) { e, v ->
         e.putBoolean("access_hint_dismissed", v)

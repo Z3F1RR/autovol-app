@@ -22,6 +22,9 @@ class EngineState {
 
     /** Correction learned from manual ringer changes, dB; positive = louder ([Learning]). */
     var learnedBiasDb: Double = 0.0
+
+    /** Correction learned from manual media changes, % of the range; positive = louder. */
+    var learnedMediaPct: Double = 0.0
     var mediaOverrideUntilMs: Long = 0
 
     fun resync() {
@@ -69,10 +72,12 @@ class Engine(
     val state: EngineState = EngineState(),
     private val streams: List<Stream> = listOf(Stream.RING, Stream.NOTIFICATION),
     private val biasStore: BiasStore = MemoryBiasStore(),
+    private val mediaBiasStore: BiasStore = MemoryBiasStore(),
 ) {
     init {
         if (state.lastChangeMs == 0L) state.lastChangeMs = p.nowMs()
         state.learnedBiasDb = biasStore.load()
+        state.learnedMediaPct = mediaBiasStore.load()
     }
 
     fun cycle(s: Settings): CycleResult {
@@ -255,26 +260,38 @@ class Engine(
         )
     }
 
-    /** Forget the learned correction. */
+    /** Forget the learned corrections (ringer and media). */
     fun resetLearning() {
         state.learnedBiasDb = 0.0
         biasStore.save(0.0)
+        state.learnedMediaPct = 0.0
+        mediaBiasStore.save(0.0)
     }
 
-    /** The user moved the media slider since we set it: leave media alone for OVERRIDE_MIN. */
+    /**
+     * The user moved the media slider since we set it: leave media alone for OVERRIDE_MIN and, if
+     * learning is on, remember the direction. Muting and turning it all the way up are not learned.
+     */
     private fun checkMediaOverride(s: Settings, now: Long) {
         val set = state.mediaLastSet ?: return
         val v = p.volume(Stream.MEDIA) ?: return
-        if (v.cur != set) {
-            state.mediaLastSet = null
-            state.mediaOverrideUntilMs = now + s.overrideMin * 60_000L
-            p.log("громкость мультимедиа изменена вручную — не трогаю ${s.overrideMin} мин")
+        if (v.cur == set) return
+        state.mediaLastSet = null
+        state.mediaOverrideUntilMs = now + s.overrideMin * 60_000L
+        var learned = ""
+        if (s.learnFromManual && v.cur != 0 && v.cur != v.max) {
+            val dir = if (v.cur > set) 1 else -1
+            val before = state.learnedMediaPct
+            state.learnedMediaPct = Learning.nextMedia(before, dir)
+            if (state.learnedMediaPct != before) mediaBiasStore.save(state.learnedMediaPct)
+            learned = ", учтено (" + (if (dir > 0) "громче" else "тише") + "), поправка ${signed(state.learnedMediaPct)}%"
         }
+        p.log("громкость мультимедиа изменена вручную $set→${v.cur}$learned — не трогаю ${s.overrideMin} мин")
     }
 
     /**
      * Media follows the ringer step shifted by [Settings.mediaSens] steps. Muted media (0) and media
-     * the user turned all the way up stay as they are.
+     * the user turned all the way up stay as they are. The learned media correction shifts the percentage.
      */
     private fun applyMedia(s: Settings, now: Long, lv: List<Level>, ringStep: Int, changed: MutableList<String>) {
         val st = state
@@ -285,7 +302,8 @@ class Engine(
             return
         }
         val step = (ringStep + s.mediaSens).coerceIn(0, lv.size - 1)
-        val t = Levels.targetVol(lv[step].pct, v.min, v.max, 1)
+        val pct = Levels.pyRound((lv[step].pct + st.learnedMediaPct).coerceIn(0.0, 100.0)).toInt()
+        val t = Levels.targetVol(pct, v.min, v.max, 1)
         if (t != v.cur) {
             p.setVolume(Stream.MEDIA, t)
             changed += "${streamName(Stream.MEDIA)}:${v.cur}→$t"
