@@ -32,7 +32,14 @@ class FitTest {
     val compose = createComposeRule()
 
     @Test
-    fun mainScreenFitsWithoutScrolling() {
+    @Config(qualifiers = "+ru")
+    fun fitsInRussian() = mainScreenFitsWithoutScrolling("ru", "В течение")
+
+    @Test
+    @Config(qualifiers = "+en")
+    fun fitsInEnglish() = mainScreenFitsWithoutScrolling("en", "Within")
+
+    private fun mainScreenFitsWithoutScrolling(lang: String, lastLabel: String) {
         AutoVol.prefs.enabled = true
         AutoVol.setServiceRunning(true)
         AutoVol.prefs.mediaEnabled = true
@@ -47,11 +54,11 @@ class FitTest {
             mic = MicAccess.Level.BASIC, phoneState = true, callLog = true, rootManager = "KernelSU Next")
         compose.setContent { AutoVolTheme { MainContent(live, {}, {}, {}) } }
         compose.onRoot().captureRoboImage(
-            System.getProperty("roborazzi.outputDir", "build/outputs/roborazzi") + "/main_fit_393x851.png",
+            System.getProperty("roborazzi.outputDir", "build/outputs/roborazzi") + "/main_fit_393x851_$lang.png",
         )
         val density = compose.onRoot().fetchSemanticsNode().layoutInfo.density.density
         // unclipped position of the last row (the repeat-call window slider)
-        val node = compose.onNodeWithText("Окно").fetchSemanticsNode()
+        val node = compose.onNodeWithText(lastLabel).fetchSemanticsNode()
         val bottomDp = (node.positionInRoot.y + node.size.height) / density + 12 // + card padding
         assertTrue("content ends at $bottomDp dp", bottomDp <= 851 - 60)
     }

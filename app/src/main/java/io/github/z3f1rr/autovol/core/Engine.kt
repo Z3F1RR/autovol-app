@@ -38,7 +38,23 @@ enum class Outcome {
     APPLIED,
 }
 
-data class CycleResult(val waitSec: Int, val note: String, val outcome: Outcome)
+/** Why a cycle did not apply a measurement: localized by the UI ([CycleResult.note] is the log text). */
+enum class Reason {
+    NONE, DISABLED, USER_PAUSE, RINGER, DND, CALL, CAR, EXT_AUDIO, LOW_BATTERY, VOLUME_ERROR, MANUAL,
+    PLAYING, MEASURE_ERROR, MIC_MUTED, RAISE_UNCONFIRMED, MODE_CHANGED, ERROR,
+}
+
+/**
+ * [note] is the detailed log line (Russian, for the author); [reason] + [arg] are for the UI.
+ * [arg] is a time "HH:mm" or a battery level, depending on [reason].
+ */
+data class CycleResult(
+    val waitSec: Int,
+    val note: String,
+    val outcome: Outcome,
+    val reason: Reason = Reason.NONE,
+    val arg: String? = null,
+)
 
 /**
  * Pure port of cycle() from reference/autovol.py. The decision logic must stay 1:1 with the script;
@@ -61,34 +77,37 @@ class Engine(
         val slow = s.slow
         val idle = s.idle
 
-        fun pause(reason: String, wait: Int = idle): CycleResult {
+        fun pause(note: String, reason: Reason, arg: String? = null, wait: Int = idle): CycleResult {
             st.resync()
-            return CycleResult(wait, reason, Outcome.PAUSED)
+            return CycleResult(wait, note, Outcome.PAUSED, reason, arg)
         }
 
-        fun skip(wait: Int, reason: String) = CycleResult(wait, reason, Outcome.SKIPPED)
+        fun skip(wait: Int, note: String, reason: Reason, arg: String? = null) =
+            CycleResult(wait, note, Outcome.SKIPPED, reason, arg)
 
-        if (!s.enabled) return pause("выключено")
+        if (!s.enabled) return pause("выключено", Reason.DISABLED)
         if (now < s.pauseUntilMs) {
             val left = ((s.pauseUntilMs - now + 999) / 1000).toInt()
-            return pause("пауза до ${hhmm(s.pauseUntilMs)}", minOf(idle, max(1, left)))
+            val until = hhmm(s.pauseUntilMs)
+            return pause("пауза до $until", Reason.USER_PAUSE, until, minOf(idle, max(1, left)))
         }
-        p.ringerNotNormal()?.let { return pause("режим звонка: $it") }
-        if (s.pauseOnDnd && p.dndActive()) return pause("режим Не беспокоить")
-        p.callState()?.let { return skip(fast, "пропуск: $it") }
-        if (p.carMode()) return pause("пауза: режим автомобиля")
-        if (s.pauseOnExtAudio) p.externalOutput()?.let { return pause("пауза: звук идёт на $it") }
+        p.ringerNotNormal()?.let { return pause("режим звонка: $it", Reason.RINGER) }
+        if (s.pauseOnDnd && p.dndActive()) return pause("режим Не беспокоить", Reason.DND)
+        p.callState()?.let { return skip(fast, "пропуск: $it", Reason.CALL) }
+        if (p.carMode()) return pause("пауза: режим автомобиля", Reason.CAR)
+        if (s.pauseOnExtAudio) p.externalOutput()?.let { return pause("пауза: звук идёт на $it", Reason.EXT_AUDIO) }
         val bat = p.battery()
         if (bat.level != null && bat.level <= s.lowBat && !bat.charging) {
-            return pause("пауза: заряд ${bat.level}%")
+            return pause("пауза: заряд ${bat.level}%", Reason.LOW_BATTERY, bat.level.toString())
         }
 
         val cur = streams.associateWith { p.volume(it) }
         if (cur.values.any { it == null }) {
-            return skip(idle, "ошибка: не удалось прочитать громкость")
+            return skip(idle, "ошибка: не удалось прочитать громкость", Reason.VOLUME_ERROR)
         }
         if (now < st.overrideUntilMs) {
-            return skip(idle, "ручная громкость, жду до ${hhmm(st.overrideUntilMs)}")
+            val until = hhmm(st.overrideUntilMs)
+            return skip(idle, "ручная громкость, жду до $until", Reason.MANUAL, until)
         }
         if (st.overrideUntilMs != 0L) {
             st.overrideUntilMs = 0
@@ -97,27 +116,29 @@ class Engine(
         if (st.lastSet.isNotEmpty() && streams.any { cur[it]!!.cur != (st.lastSet[it] ?: cur[it]!!.cur) }) {
             st.resync()
             st.overrideUntilMs = now + s.overrideMin * 60_000L
-            return skip(idle, "громкость изменена вручную — пауза ${s.overrideMin} мин")
+            return skip(idle, "громкость изменена вручную — пауза ${s.overrideMin} мин", Reason.MANUAL, hhmm(st.overrideUntilMs))
         }
         if (s.mediaEnabled) checkMediaOverride(s, now)
         val chkPlay = s.pauseOnMedia
 
         /** One clean measurement: (db, null) or (null, skip reason). */
-        fun sample(): Pair<Double?, String?> {
-            if (chkPlay) p.playing()?.let { return null to "пропуск: телефон воспроизводит звук ($it)" }
+        fun sample(): Pair<Double?, Pair<String, Reason>?> {
+            if (chkPlay) p.playing()?.let { return null to ("пропуск: телефон воспроизводит звук ($it)" to Reason.PLAYING) }
             val db = when (val m = p.measure(s.recSec)) {
-                is Measurement.Error -> return null to "ошибка замера: ${m.message}"
+                is Measurement.Error -> return null to ("ошибка замера: ${m.message}" to Reason.MEASURE_ERROR)
                 is Measurement.Level -> m.db
             }
-            if (db <= s.silentDb) return null to "${f1(db)} дБ — микрофон заглушён системой/занят, пропуск"
+            if (db <= s.silentDb) {
+                return null to ("${f1(db)} дБ — микрофон заглушён системой/занят, пропуск" to Reason.MIC_MUTED)
+            }
             if (chkPlay) p.playing()?.let {
-                return null to "${f1(db)} дБ отброшен: во время замера играл звук ($it)"
+                return null to ("${f1(db)} дБ отброшен: во время замера играл звук ($it)" to Reason.PLAYING)
             }
             return db to null
         }
 
         val (db0, why) = sample()
-        if (db0 == null) return skip(fast, why!!)
+        if (db0 == null) return skip(fast, why!!.first, why.second)
         var db: Double = db0
         val (calibrated, cal) = Levels.autoLevels(history.values(), s.levels, s)
         val lv = Levels.withSensitivity(calibrated, s.ringSens)
@@ -128,7 +149,7 @@ class Engine(
             // Confirmation: a single spike (notification sound, knock, rustle) must not raise the volume.
             p.sleep(s.confirmSec)
             val (db2, why2) = sample()
-            if (db2 == null) return skip(fast, "повышение не подтверждено ($why2)")
+            if (db2 == null) return skip(fast, "повышение не подтверждено (${why2!!.first})", Reason.RAISE_UNCONFIRMED)
             history.add(db, now, s.calDays)
             if (Levels.stepOf(db2, lv) < up) {
                 p.log("всплеск ${f1(db)} дБ не подтвердился (повтор ${f1(db2)} дБ)")
@@ -155,7 +176,7 @@ class Engine(
                 val (db2, why2) = sample()
                 if (db2 == null) {
                     new = k
-                    extra = " [понижение отложено: $why2]"
+                    extra = " [понижение отложено: ${why2!!.first}]"
                 } else {
                     history.add(db2, now, s.calDays)
                     val dn2 = Levels.stepOf(db2 + m, lv)
@@ -175,7 +196,7 @@ class Engine(
         // Re-check right before changing: the slider or a call may have changed during measurement.
         if (p.ringerNotNormal() != null || p.callState() != null) {
             st.resync()
-            return skip(fast, "режим изменился во время замера — пропуск")
+            return skip(fast, "режим изменился во время замера — пропуск", Reason.MODE_CHANGED)
         }
         val changed = ArrayList<String>()
         for (str in streams) {

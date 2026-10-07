@@ -11,11 +11,14 @@ val keyAliasName = providers.environmentVariable("KEY_ALIAS").orNull
 val hasSigningKey = keystoreFile != null && file(keystoreFile).exists() &&
     keystorePassword != null && keyAliasName != null
 
-// Monotonic version code on CI; tag v1.2.3 -> versionName 1.2.3.
-val ciRun = providers.environmentVariable("GITHUB_RUN_NUMBER").orNull?.toIntOrNull()
-val refName = providers.environmentVariable("GITHUB_REF_NAME").orNull
-val tagVersion = refName?.takeIf { providers.environmentVariable("GITHUB_REF_TYPE").orNull == "tag" }
-    ?.removePrefix("v")
+// Release version: bump both for every release (F-Droid builds from these values).
+val appVersionName = "1.0.0"
+val appVersionCode = 10000 // major * 10000 + minor * 100 + patch
+
+// CI builds of branches get "-dev.N" (same versionCode, so they install over each other and the
+// in-app updater offers the release); tag builds must match appVersionName.
+val ciRun = providers.environmentVariable("GITHUB_RUN_NUMBER").orNull
+val isTag = providers.environmentVariable("GITHUB_REF_TYPE").orNull == "tag"
 
 android {
     namespace = "io.github.z3f1rr.autovol"
@@ -25,8 +28,12 @@ android {
         applicationId = "io.github.z3f1rr.autovol"
         minSdk = 29
         targetSdk = 36
-        versionCode = ciRun ?: 1
-        versionName = tagVersion ?: "0.1.0" + (ciRun?.let { "-dev.$it" } ?: "-local")
+        versionCode = appVersionCode
+        versionName = appVersionName + when {
+            isTag -> ""
+            ciRun != null -> "-dev.$ciRun"
+            else -> "-local"
+        }
     }
 
     signingConfigs {
@@ -59,6 +66,11 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    // The app is translated to English and Russian only: drop other locales from libraries.
+    androidResources {
+        localeFilters += listOf("en", "ru")
     }
 
     testOptions {

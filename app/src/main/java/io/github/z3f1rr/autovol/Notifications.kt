@@ -18,12 +18,12 @@ object Notifications {
     fun createChannels(ctx: Context) {
         val nm = ctx.getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
-            NotificationChannel(CH_STATUS, "Статус автогромкости", NotificationManager.IMPORTANCE_LOW).apply {
+            NotificationChannel(CH_STATUS, ctx.getString(R.string.ch_status), NotificationManager.IMPORTANCE_LOW).apply {
                 setShowBadge(false)
             },
         )
         nm.createNotificationChannel(
-            NotificationChannel(CH_RESUME, "Возобновление после перезагрузки", NotificationManager.IMPORTANCE_DEFAULT),
+            NotificationChannel(CH_RESUME, ctx.getString(R.string.ch_resume), NotificationManager.IMPORTANCE_DEFAULT),
         )
     }
 
@@ -41,9 +41,9 @@ object Notifications {
         val pausedByUser = AutoVol.prefs.pauseUntilMs > System.currentTimeMillis()
         val text = shortStatus(ctx, st)
         val action = if (pausedByUser) {
-            Notification.Action.Builder(null, "Возобновить", ActionReceiver.pending(ctx, ActionReceiver.ACTION_RESUME)).build()
+            Notification.Action.Builder(null, ctx.getString(R.string.act_resume), ActionReceiver.pending(ctx, ActionReceiver.ACTION_RESUME)).build()
         } else {
-            Notification.Action.Builder(null, "Пауза 1 ч", ActionReceiver.pending(ctx, ActionReceiver.ACTION_PAUSE_1H)).build()
+            Notification.Action.Builder(null, ctx.getString(R.string.act_pause), ActionReceiver.pending(ctx, ActionReceiver.ACTION_PAUSE_1H)).build()
         }
         val b = Notification.Builder(ctx, CH_STATUS)
             .setSmallIcon(R.drawable.ic_stat)
@@ -65,16 +65,21 @@ object Notifications {
     /** Title + body for the ongoing notification. */
     fun shortStatus(ctx: Context, st: Status): Pair<String, String> {
         val am = ctx.getSystemService(android.media.AudioManager::class.java)
-        val ring = "звонок ${am.getStreamVolume(android.media.AudioManager.STREAM_RING)}/" +
-            am.getStreamMaxVolume(android.media.AudioManager.STREAM_RING)
-        if (st.timeMs == 0L) return "AutoVol: запуск" to ring
+        val ring = ctx.getString(
+            R.string.notif_ring,
+            am.getStreamVolume(android.media.AudioManager.STREAM_RING),
+            am.getStreamMaxVolume(android.media.AudioManager.STREAM_RING),
+        )
+        if (st.timeMs == 0L) return ctx.getString(R.string.notif_starting) to ring
+        val reason = Texts.reason(ctx, st)
         val title = when {
             st.outcome == "APPLIED" && st.step != null && st.pct != null ->
-                "Ступень ${st.step}/${st.steps} (${st.pct}%) · $ring"
-            st.paused -> "Пауза · $ring"
+                ctx.getString(R.string.notif_step, st.step, st.steps, st.pct, ring)
+            st.paused -> ctx.getString(R.string.notif_paused, ring)
             else -> "AutoVol · $ring"
         }
-        return title to st.note
+        val body = reason ?: st.lastDb?.let { ctx.getString(R.string.notif_level, String.format(java.util.Locale.ROOT, "%.0f", it)) }
+        return title to body.orEmpty()
     }
 
     fun update(ctx: Context) {
@@ -84,8 +89,8 @@ object Notifications {
     fun showResume(ctx: Context) {
         val n = Notification.Builder(ctx, CH_RESUME)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle("Автогромкость остановлена")
-            .setContentText("Нажмите, чтобы возобновить автогромкость")
+            .setContentTitle(ctx.getString(R.string.resume_title))
+            .setContentText(ctx.getString(R.string.resume_text))
             .setContentIntent(openApp(ctx, true))
             .setAutoCancel(true)
             .build()

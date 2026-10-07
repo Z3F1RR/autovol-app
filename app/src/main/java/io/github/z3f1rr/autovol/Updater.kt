@@ -38,7 +38,7 @@ object Updater {
         data class Available(val release: Release) : State
         data class Downloading(val release: Release, val progress: Float) : State
         data object Installing : State
-        data class Failed(val message: String) : State
+        data class Failed(val res: Int, val arg: String? = null) : State
     }
 
     private val _state = MutableStateFlow<State>(State.Idle)
@@ -91,21 +91,21 @@ object Updater {
                         val rel = parseRelease(c.inputStream.bufferedReader().readText())
                         AutoVol.prefs.lastUpdateCheckMs = System.currentTimeMillis()
                         when {
-                            rel == null -> State.Failed("В последнем релизе нет APK")
+                            rel == null -> State.Failed(R.string.upd_err_no_apk)
                             Versions.isNewer(rel.version, currentVersion(ctx)) -> State.Available(rel)
                             else -> State.UpToDate(currentVersion(ctx))
                         }
                     }
                     404 -> {
                         AutoVol.prefs.lastUpdateCheckMs = System.currentTimeMillis()
-                        State.Failed("Релизов пока нет")
+                        State.Failed(R.string.upd_err_no_releases)
                     }
-                    else -> State.Failed("GitHub ответил ${c.responseCode}")
+                    else -> State.Failed(R.string.upd_err_http, c.responseCode.toString())
                 }
             } catch (e: IOException) {
-                State.Failed("Нет связи с GitHub: ${e.message ?: e.javaClass.simpleName}")
+                State.Failed(R.string.upd_err_network)
             } catch (e: JSONException) {
-                State.Failed("Не удалось разобрать ответ GitHub")
+                State.Failed(R.string.upd_err_parse)
             }
         }
         _state.value = if (quiet && result is State.Failed) State.Idle else result
@@ -135,7 +135,7 @@ object Updater {
                 }
             }
         } catch (e: IOException) {
-            _state.value = State.Failed("Загрузка не удалась: ${e.message}")
+            _state.value = State.Failed(R.string.upd_err_download)
             return
         }
         _state.value = State.Installing
@@ -170,17 +170,17 @@ object Updater {
                 s.commit(pi.intentSender)
             }
         } catch (e: Exception) {
-            _state.value = State.Failed("Установщик: ${e.message}")
+            _state.value = State.Failed(R.string.upd_err_installer, e.message)
         }
     }
 
     internal fun onInstallStatus(status: Int, message: String?) {
         _state.value = when (status) {
             PackageInstaller.STATUS_SUCCESS -> State.Idle
-            PackageInstaller.STATUS_FAILURE_ABORTED -> State.Failed("Установка отменена")
+            PackageInstaller.STATUS_FAILURE_ABORTED -> State.Failed(R.string.upd_err_cancelled)
             PackageInstaller.STATUS_FAILURE_CONFLICT, PackageInstaller.STATUS_FAILURE_INCOMPATIBLE ->
-                State.Failed("Подпись APK отличается от установленной — удалите приложение и поставьте релиз вручную")
-            else -> State.Failed("Установка не удалась: ${message ?: status}")
+                State.Failed(R.string.upd_err_signature)
+            else -> State.Failed(R.string.upd_err_failed, message ?: status.toString())
         }
         if (status != PackageInstaller.STATUS_SUCCESS) AutoVol.log.add("обновление: ${message ?: status}")
     }

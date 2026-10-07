@@ -46,7 +46,7 @@ import java.io.File
  * boot, appops detection, repeat-call receiver and root helper. Replaces the missing emulator.
  */
 @RunWith(AndroidJUnit4::class)
-@Config(sdk = [29, 31, 34, 36])
+@Config(sdk = [29, 31, 34, 36], qualifiers = "ru")
 class AppSmokeTest {
     @get:Rule
     val compose = createAndroidComposeRule<MainActivity>()

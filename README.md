@@ -1,5 +1,7 @@
 # AutoVol — автогромкость звонка по окружающему шуму
 
+[English](README.en.md)
+
 Приложение для Android: раз в 1–5 минут на 2 секунды слушает микрофоном окружающий шум и
 выставляет громкость звонка и уведомлений. В тишине — минимум, в шуме — ступенчато до максимума.
 
@@ -22,7 +24,8 @@
 
 ## Установка
 
-Скачайте APK из [Releases](../../releases) и установите. Тестовые сборки — во вкладке
+Скачайте APK из [Releases](../../releases) и установите. Дальше приложение обновляется само
+(«Ещё» → «Обновления»). Тестовые сборки — во вкладке
 Actions → последний запуск → Artifacts.
 
 Требуется Android 10 или новее.
@@ -65,8 +68,13 @@ Android не даёт приложениям слушать микрофон в 
 (`app/build/outputs/roborazzi`).
 Подпись релизов через GitHub Actions — см. [docs/SIGNING.md](docs/SIGNING.md).
 
+## Выпуск версии
+
+1. Поднять `appVersionName` и `appVersionCode` в `app/build.gradle.kts`.
+2. Добавить `fastlane/metadata/android/{ru-RU,en-US}/changelogs/<versionCode>.txt` и раздел в `CHANGELOG.md`.
+3. Создать тег `v<appVersionName>` (на GitHub: Releases → Draft a new release → новый тег). Сборка
+   проверит тег, подпишет APK ключом из секретов (`docs/SIGNING.md`) и опубликует релиз с заметками.
+
 ## Скриншоты
 
-<img src="docs/screenshots/main_fit_393x851.png" width="260"> <img src="docs/screenshots/main_dark_root.png" width="260"> <img src="docs/screenshots/more_dark.png" width="260">
-
-<img src="docs/screenshots/launcher_icon.png" width="400">
+<img src="docs/screenshots/main_fit_393x851_ru.png" width="260"> <img src="docs/screenshots/more_dark.png" width="260">

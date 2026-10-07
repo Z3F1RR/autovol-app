@@ -74,13 +74,28 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: |
-          if [ -z "$KEYSTORE_FILE" ]; then echo "::error::Для релиза нужны секреты подписи"; exit 1; fi
+          if [ -z "$KEYSTORE_FILE" ]; then echo "::error::Для релиза нужны секреты подписи (docs/SIGNING.md)"; exit 1; fi
+          name=$(sed -n 's/^val appVersionName = "\(.*\)"/\1/p' app/build.gradle.kts)
+          code=$(sed -n 's/^val appVersionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts)
+          if [ "v$name" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Тег $GITHUB_REF_NAME не совпадает с appVersionName $name в app/build.gradle.kts"; exit 1
+          fi
           ./gradlew --stacktrace assembleRelease
-          mv app/build/outputs/apk/release/app-release.apk "AutoVol-${GITHUB_REF_NAME}.apk"
+          apk="AutoVol-${GITHUB_REF_NAME}.apk"
+          mv app/build/outputs/apk/release/app-release.apk "$apk"
+          sha256sum "$apk" > "$apk.sha256"
+          {
+            cat "fastlane/metadata/android/ru-RU/changelogs/$code.txt"
+            printf '\n---\n\n'
+            cat "fastlane/metadata/android/en-US/changelogs/$code.txt"
+            printf '\n\nSHA-256: %s\n' "$(cut -d' ' -f1 "$apk.sha256")"
+          } > release-notes.md
 
       - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v3
         with:
-          files: AutoVol-${{ github.ref_name }}.apk
-          generate_release_notes: true
+          files: |
+            AutoVol-${{ github.ref_name }}.apk
+            AutoVol-${{ github.ref_name }}.apk.sha256
+          body_path: release-notes.md

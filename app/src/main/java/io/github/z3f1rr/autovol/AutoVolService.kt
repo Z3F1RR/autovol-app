@@ -11,6 +11,7 @@ import android.os.IBinder
 import android.os.PowerManager
 import io.github.z3f1rr.autovol.core.CycleResult
 import io.github.z3f1rr.autovol.core.Outcome
+import io.github.z3f1rr.autovol.core.Reason
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -139,7 +140,7 @@ class AutoVolService : Service() {
             engine.cycle(settings)
         } catch (e: Exception) {
             AutoVol.log.add("исключение: ${e.stackTraceToString().lines().take(3).joinToString(" | ")}")
-            CycleResult(120, "исключение: ${e.javaClass.simpleName} ${e.message}", Outcome.SKIPPED)
+            CycleResult(120, "исключение: ${e.javaClass.simpleName} ${e.message}", Outcome.SKIPPED, Reason.ERROR)
         }
         if (r.note != lastNote || " дБ" in r.note) AutoVol.log.add(r.note)
         if (!diagLogged || diagRequested) {
@@ -159,6 +160,8 @@ class AutoVolService : Service() {
                 timeMs = System.currentTimeMillis(),
                 note = r.note,
                 outcome = r.outcome.name,
+                reason = r.reason.name,
+                reasonArg = r.arg,
                 lastDb = st.lastDb,
                 step = st.step,
                 steps = lv.size - 1,

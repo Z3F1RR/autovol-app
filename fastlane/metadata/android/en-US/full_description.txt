@@ -1,0 +1,13 @@
+AutoVol listens to the surroundings for 2 seconds every 1–5 minutes and sets the ring and notification volume: minimum in a quiet room, step by step up to maximum in a noisy place.
+
+<ul>
+<li>A single spike (a knock, a notification sound) does not raise the volume: an increase is confirmed by a second measurement.</li>
+<li>When it gets quiet, the volume goes back down quickly, but a short pause between songs does not reset it.</li>
+<li>Does nothing in vibrate/silent mode, Do Not Disturb, during calls, with headphones or Bluetooth, in car mode, on low battery and while the phone itself plays sound.</li>
+<li>If you change the volume yourself, AutoVol leaves it alone for 30 minutes.</li>
+<li>Noise thresholds calibrate themselves continuously over the last 7 days.</li>
+<li>Optional: media volume follows the noise too; a repeat call after a missed one rings at full volume.</li>
+<li>Root is optional: with root AutoVol starts by itself after reboot.</li>
+</ul>
+
+No ads, no analytics. The only network access is the optional update check on GitHub Releases. The green microphone indicator during a measurement is expected.

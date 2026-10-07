@@ -8,6 +8,9 @@ data class Status(
     val note: String = "",
     /** Outcome name: PAUSED / SKIPPED / APPLIED. */
     val outcome: String = "",
+    /** [io.github.z3f1rr.autovol.core.Reason] name and its argument, for the localized UI line. */
+    val reason: String = "",
+    val reasonArg: String? = null,
     val lastDb: Double? = null,
     val step: Int? = null,
     val steps: Int = 0,
@@ -25,6 +28,8 @@ data class Status(
         put("timeMs", timeMs)
         put("note", note)
         put("outcome", outcome)
+        put("reason", reason)
+        reasonArg?.let { put("reasonArg", it) }
         lastDb?.let { put("lastDb", it) }
         step?.let { put("step", it) }
         put("steps", steps)
@@ -45,6 +50,8 @@ data class Status(
                     timeMs = o.optLong("timeMs"),
                     note = o.optString("note"),
                     outcome = o.optString("outcome"),
+                    reason = o.optString("reason"),
+                    reasonArg = if (o.has("reasonArg")) o.getString("reasonArg") else null,
                     lastDb = if (o.has("lastDb")) o.getDouble("lastDb") else null,
                     step = if (o.has("step")) o.getInt("step") else null,
                     steps = o.optInt("steps"),

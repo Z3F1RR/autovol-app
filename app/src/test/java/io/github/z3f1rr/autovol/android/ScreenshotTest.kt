@@ -30,7 +30,7 @@ import org.robolectric.annotation.GraphicsMode
 /** Renders the main screen and the launcher icon to build/outputs/roborazzi for visual review. */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [36], qualifiers = "w400dp-h2300dp-xxhdpi")
+@Config(sdk = [36], qualifiers = "ru-w400dp-h2300dp-xxhdpi")
 class ScreenshotTest {
     @get:Rule
     val compose = createComposeRule()
@@ -76,7 +76,9 @@ class ScreenshotTest {
     }
 
     @Test
-    fun moreScreenDark() {
+    fun moreScreenDark() = renderMore("more_dark")
+
+    private fun renderMore(name: String) {
         AutoVol.prefs.themeMode.value = "DARK"
         AutoVol.prefs.pureBlack.value = false
         AutoVol.prefs.accentSource.value = "CUSTOM"
@@ -86,7 +88,28 @@ class ScreenshotTest {
         val live = Live(mic = MicAccess.Level.BASIC, exactAlarms = false, batteryUnrestricted = true,
             rootManager = "KernelSU Next", rootGranted = true)
         compose.setContent { AutoVolTheme { MoreContent(live, {}, {}) } }
-        compose.onRoot().captureRoboImage(out("more_dark"))
+        compose.onRoot().captureRoboImage(out(name))
+    }
+
+    @Test
+    @Config(qualifiers = "+en")
+    fun moreScreenEnglish() = renderMore("more_dark_en")
+
+    /** 512 px store icon (fastlane/F-Droid): the adaptive icon in a rounded square. */
+    @Test
+    fun storeIcon() {
+        val ctx = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val icon = ContextCompat.getDrawable(ctx, R.mipmap.ic_launcher) as AdaptiveIconDrawable
+        val size = 512
+        val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        c.clipPath(Path().apply { addRoundRect(RectF(0f, 0f, 512f, 512f), 112f, 112f, Path.Direction.CW) })
+        val pad = size / 4
+        icon.background.setBounds(-pad, -pad, size + pad, size + pad)
+        icon.background.draw(c)
+        icon.foreground.setBounds(-pad, -pad, size + pad, size + pad)
+        icon.foreground.draw(c)
+        bmp.captureRoboImage(out("store_icon"))
     }
 
     @Test

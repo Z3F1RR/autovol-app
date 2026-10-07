@@ -23,7 +23,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.res.stringResource
 import io.github.z3f1rr.autovol.AutoVol
+import io.github.z3f1rr.autovol.R
 import io.github.z3f1rr.autovol.AutoVolService
 import io.github.z3f1rr.autovol.BuildConfigInfo
 import io.github.z3f1rr.autovol.MicAccess
@@ -39,9 +41,9 @@ fun LogScreen(onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Журнал") },
-                navigationIcon = { TextButton(onClick = onBack) { Text("Назад") } },
-                actions = { TextButton(onClick = { share(ctx) }) { Text("Поделиться") } },
+                title = { Text(stringResource(R.string.sec_log)) },
+                navigationIcon = { TextButton(onClick = onBack) { Text(stringResource(R.string.btn_back)) } },
+                actions = { TextButton(onClick = { share(ctx) }) { Text(stringResource(R.string.log_share)) } },
             )
         },
     ) { pad ->
@@ -99,7 +101,7 @@ private fun share(ctx: Context) {
     }
     val send = Intent(Intent.ACTION_SEND)
         .setType("text/plain")
-        .putExtra(Intent.EXTRA_SUBJECT, "Журнал AutoVol")
+        .putExtra(Intent.EXTRA_SUBJECT, ctx.getString(R.string.log_share_subject))
         .putExtra(Intent.EXTRA_TEXT, header + AutoVol.log.text())
-    ctx.startActivity(Intent.createChooser(send, "Отправить журнал"))
+    ctx.startActivity(Intent.createChooser(send, ctx.getString(R.string.log_share_chooser)))
 }

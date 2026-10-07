@@ -125,9 +125,9 @@ object Root {
         if (!id.ok || "uid=0" !in id.output) {
             val manager = managerName(ctx)
             val hint = if (manager != null) {
-                "Root не выдан: разрешите AutoVol в $manager → Суперпользователь и повторите."
+                ctx.getString(R.string.root_not_granted, manager)
             } else {
-                "Root не найден."
+                ctx.getString(R.string.root_not_found)
             }
             AutoVol.log.add("root: недоступен (${id.output.take(80)})")
             return Result(false, hint)
@@ -143,7 +143,7 @@ object Root {
             "root: работает (${managerName(ctx) ?: "su"}); appops: $uidMode" +
                 if (failed.isNotEmpty()) "; ошибки: ${failed.joinToString("; ")}" else "",
         )
-        return Result(true, "Root работает: после перезагрузки AutoVol запустится сам.")
+        return Result(true, ctx.getString(R.string.root_ok))
     }
 
     /**

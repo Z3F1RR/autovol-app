@@ -34,6 +34,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import io.github.z3f1rr.autovol.R
 
 @Composable
 fun SectionLabel(text: String) {
@@ -115,7 +116,7 @@ fun noTicks() = SliderDefaults.colors(activeTickColor = Color.Transparent, inact
 
 fun copyToClipboard(ctx: Context, text: String) {
     ctx.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("AutoVol", text))
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) Toast.makeText(ctx, "Скопировано", Toast.LENGTH_SHORT).show()
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) Toast.makeText(ctx, ctx.getString(R.string.copied), Toast.LENGTH_SHORT).show()
 }
 
 @SuppressLint("BatteryLife")

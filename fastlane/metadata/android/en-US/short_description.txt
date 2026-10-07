@@ -1,0 +1,1 @@
+Ring and notification volume that follows the ambient noise
