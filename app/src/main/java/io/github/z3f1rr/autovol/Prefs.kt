@@ -44,6 +44,36 @@ class Prefs(context: Context) {
             _minVol.value = v
         }
 
+    private val _ringSens = MutableStateFlow(sp.getInt("ring_sens", d.ringSens))
+    val ringSensFlow: StateFlow<Int> = _ringSens.asStateFlow()
+
+    var ringSens: Int
+        get() = _ringSens.value
+        set(v) {
+            sp.edit().putInt("ring_sens", v).apply()
+            _ringSens.value = v
+        }
+
+    private val _mediaEnabled = MutableStateFlow(sp.getBoolean("media_enabled", d.mediaEnabled))
+    val mediaEnabledFlow: StateFlow<Boolean> = _mediaEnabled.asStateFlow()
+
+    var mediaEnabled: Boolean
+        get() = _mediaEnabled.value
+        set(v) {
+            sp.edit().putBoolean("media_enabled", v).apply()
+            _mediaEnabled.value = v
+        }
+
+    private val _mediaSens = MutableStateFlow(sp.getInt("media_sens", d.mediaSens))
+    val mediaSensFlow: StateFlow<Int> = _mediaSens.asStateFlow()
+
+    var mediaSens: Int
+        get() = _mediaSens.value
+        set(v) {
+            sp.edit().putInt("media_sens", v).apply()
+            _mediaSens.value = v
+        }
+
     var pauseUntilMs: Long
         get() = _pauseUntil.value
         set(v) {
@@ -59,7 +89,7 @@ class Prefs(context: Context) {
             } else {
                 RepeatMode.SAME_NUMBER
             },
-            windowMin = sp.getInt("repeat_window_min", RepeatSettings().windowMin),
+            windowMin = sp.getInt("repeat_window_min2", RepeatSettings().windowMin),
         ),
     )
     val repeatFlow: StateFlow<RepeatSettings> = _repeat.asStateFlow()
@@ -70,9 +100,16 @@ class Prefs(context: Context) {
             sp.edit()
                 .putBoolean("repeat_enabled", v.enabled)
                 .putString("repeat_mode", v.mode.name)
-                .putInt("repeat_window_min", v.windowMin)
+                .putInt("repeat_window_min2", v.windowMin)
                 .apply()
             _repeat.value = v
+        }
+
+    /** su worked once: re-apply the grants after reboot if the system reset them. */
+    var rootGranted: Boolean
+        get() = sp.getBoolean("root_granted", false)
+        set(v) {
+            sp.edit().putBoolean("root_granted", v).apply()
         }
 
     /** Repeat-call state machine; written synchronously, the process may die right after. */
@@ -109,6 +146,10 @@ class Prefs(context: Context) {
         calStart = sp.getInt("cal_start", d.calStart),
         calMinSpan = sp.getInt("cal_min_span", d.calMinSpan),
         calMaxSpan = sp.getInt("cal_max_span", d.calMaxSpan),
+        calWarmup = sp.getInt("cal_warmup", d.calWarmup),
+        ringSens = ringSens,
+        mediaEnabled = mediaEnabled,
+        mediaSens = mediaSens,
     )
 
     fun loadStatus(): Status = Status.fromJson(sp.getString("status", null))

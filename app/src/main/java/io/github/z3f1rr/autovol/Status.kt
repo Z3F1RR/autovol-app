@@ -16,6 +16,8 @@ data class Status(
     val samples: Int = 0,
     val calFloor: Double? = null,
     val calTop: Double? = null,
+    /** Share of the thresholds coming from calibration, 0..1. */
+    val calWeight: Double = 0.0,
 ) {
     val paused: Boolean get() = outcome == "PAUSED"
 
@@ -31,6 +33,7 @@ data class Status(
         put("samples", samples)
         calFloor?.let { put("calFloor", it) }
         calTop?.let { put("calTop", it) }
+        put("calWeight", calWeight)
     }.toString()
 
     companion object {
@@ -50,6 +53,7 @@ data class Status(
                     samples = o.optInt("samples"),
                     calFloor = if (o.has("calFloor")) o.getDouble("calFloor") else null,
                     calTop = if (o.has("calTop")) o.getDouble("calTop") else null,
+                    calWeight = o.optDouble("calWeight", 0.0),
                 )
             } catch (e: org.json.JSONException) {
                 Status()

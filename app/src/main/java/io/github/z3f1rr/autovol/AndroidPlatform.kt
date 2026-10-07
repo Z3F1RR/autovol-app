@@ -89,6 +89,7 @@ class AndroidPlatform(private val ctx: Context) : Platform {
     private fun Stream.id() = when (this) {
         Stream.RING -> AudioManager.STREAM_RING
         Stream.NOTIFICATION -> AudioManager.STREAM_NOTIFICATION
+        Stream.MEDIA -> AudioManager.STREAM_MUSIC
     }
 
     companion object {

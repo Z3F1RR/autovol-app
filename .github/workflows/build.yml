@@ -36,8 +36,20 @@ jobs:
             echo "::warning::Секрет KEYSTORE_BASE64 не задан — APK подписан случайным debug-ключом, обновление поверх не встанет"
           fi
 
-      - name: Unit tests
+      # Robolectric Android images (Android 10/12/14/16), ~800 MB: download once.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          key: robolectric-${{ hashFiles('gradle/libs.versions.toml') }}
+
+      - name: Unit + Robolectric tests (Android 10, 12, 14, 16)
         run: ./gradlew --stacktrace testDebugUnitTest
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: app/build/outputs/roborazzi/*.png
 
       - name: Debug APK
         env:

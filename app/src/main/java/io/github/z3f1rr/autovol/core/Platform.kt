@@ -1,7 +1,7 @@
 package io.github.z3f1rr.autovol.core
 
 /** Streams AutoVol controls. */
-enum class Stream { RING, NOTIFICATION }
+enum class Stream { RING, NOTIFICATION, MEDIA }
 
 /** Current stream volume and its range. */
 data class Volume(val cur: Int, val min: Int, val max: Int)

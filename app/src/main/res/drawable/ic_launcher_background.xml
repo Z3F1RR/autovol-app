@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dark glass: deep graphite gradient with a soft top reflection (matches DarkGlass-style packs). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="20"
+                android:startY="10"
+                android:endX="88"
+                android:endY="100"
+                android:startColor="#FF3A3E46"
+                android:centerColor="#FF16181C"
+                android:endColor="#FF050506" />
+        </aapt:attr>
+    </path>
+    <!-- glass reflection: a wide soft ellipse over the upper part -->
+    <path android:pathData="M-10,0h128v40c-20,14 -44,20 -64,20s-44,-6 -64,-20z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="0"
+                android:endX="54"
+                android:endY="60"
+                android:startColor="#38FFFFFF"
+                android:endColor="#00FFFFFF" />
+        </aapt:attr>
+    </path>
+    <!-- faint cool glow at the bottom edge -->
+    <path android:pathData="M0,108h108v-30c-18,10 -36,14 -54,14s-36,-4 -54,-14z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="54"
+                android:startY="108"
+                android:endX="54"
+                android:endY="76"
+                android:startColor="#1E8FB8FF"
+                android:endColor="#008FB8FF" />
+        </aapt:attr>
+    </path>
+</vector>

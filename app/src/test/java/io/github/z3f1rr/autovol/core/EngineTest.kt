@@ -328,4 +328,87 @@ class EngineTest {
         assertEquals(listOf(-120.0, -62.0, -54.7, -47.3, -40.0), eng.state.levels.map { it.db })
         assertEquals(1, eng.state.step) // -60 is above -62
     }
+
+    @Test
+    fun calibrationInProgressIsShownInNote() {
+        val t0 = p.now / 1000
+        store.saved = List(60) { i -> Sample(t0 - 1000 + i, -70.0) }
+        val eng = Engine(p, History(store))
+        p.queue(-75.0)
+        val r = eng.cycle(s)
+        assertTrue(r.note, r.note.contains("[калибровка 20%]"))
+    }
+
+    @Test
+    fun higherRingSensitivityRaisesEarlier() {
+        settleAt(-60.0)
+        p.queue(-48.0, -48.0) // below -46 normally, but +1 notch moves step 1 to -49
+        cycle(s.copy(ringSens = 1))
+        assertEquals(1, engine.state.step)
+    }
+
+    @Test
+    fun mediaFollowsRingStepWithOffset() {
+        val ms = s.copy(mediaEnabled = true)
+        p.queue(-35.0, -35.0) // step 2 (50%)
+        val r = cycle(ms)
+        assertEquals(1 + Math.rint(29 * 0.5).toInt(), p.media()) // 1 + 14 = 15 of 30
+        assertTrue(r.note, r.note.contains("медиа:10→15"))
+        p.queue(-35.0)
+        cycle(ms.copy(mediaSens = 1)) // one step louder: 75%
+        assertEquals(1 + Math.rint(29 * 0.75).toInt(), p.media())
+    }
+
+    @Test
+    fun mediaMutedOrFullByUserIsLeftAlone() {
+        val ms = s.copy(mediaEnabled = true)
+        p.userSetsMedia(0)
+        p.queue(-60.0)
+        cycle(ms)
+        assertEquals(0, p.media())
+        p.userSetsMedia(30) // user turned it all the way up
+        p.queue(-60.0)
+        cycle(ms)
+        assertEquals(30, p.media())
+        p.userSetsMedia(20) // back to a normal level: regulated again
+        p.queue(-60.0)
+        cycle(ms)
+        assertEquals(1, p.media())
+    }
+
+    @Test
+    fun ourOwnMaximumIsStillRegulated() {
+        val ms = s.copy(mediaEnabled = true)
+        p.queue(-20.0, -20.0) // top step: media to 30 (by us)
+        cycle(ms)
+        assertEquals(30, p.media())
+        p.queue(-60.0, -60.0)
+        cycle(ms)
+        assertEquals(1, p.media())
+    }
+
+    @Test
+    fun manualMediaChangeDoesNotPauseRinger() {
+        val ms = s.copy(mediaEnabled = true)
+        p.queue(-60.0)
+        cycle(ms)
+        assertEquals(1, p.media())
+        p.userSetsMedia(12)
+        p.queue(-35.0, -35.0)
+        cycle(ms)
+        assertEquals(2, engine.state.step) // ringer still regulated
+        assertEquals(12, p.media()) // media left alone
+        assertTrue(p.logs.any { it.startsWith("громкость мультимедиа изменена вручную") })
+        p.advanceSec(30 * 60)
+        p.queue(-35.0)
+        cycle(ms)
+        assertEquals(15, p.media())
+    }
+
+    @Test
+    fun mediaDisabledIsNeverTouched() {
+        p.queue(-25.0, -25.0)
+        cycle()
+        assertEquals(10, p.media())
+    }
 }

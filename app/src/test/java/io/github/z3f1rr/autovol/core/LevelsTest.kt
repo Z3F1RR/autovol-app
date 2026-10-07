@@ -42,7 +42,7 @@ class LevelsTest {
     fun autoLevelsNeedsEnoughSamplesAndClampsSpan() {
         val lv = Levels.parse(Levels.DEFAULT)
         val s = Settings()
-        assertNull(Levels.autoLevels(List(299) { -60.0 }, lv, s).second)
+        assertNull(Levels.autoLevels(List(29) { -60.0 }, lv, s).second)
         // flat history: span clamped up to 24
         val (flat, cal) = Levels.autoLevels(List(300) { -60.0 }, lv, s)
         assertEquals(CalInfo(-60.0, -36.0, 300), cal)
@@ -52,6 +52,29 @@ class LevelsTest {
         val wide = List(150) { -80.0 } + List(150) { -10.0 }
         assertEquals(-40.0, Levels.autoLevels(wide, lv, s).second!!.topDb, 0.0)
         assertNull(Levels.autoLevels(List(300) { -60.0 }, lv, s.copy(autoCal = false)).second)
+    }
+
+    @Test
+    fun calibrationBlendsInGraduallyAndRunsContinuously() {
+        val lv = Levels.parse(Levels.DEFAULT) // -46 -39 -32 -26
+        val s = Settings()
+        // 150 of 300 samples: halfway between manual and automatic thresholds (-52 -46.7 -41.3 -36)
+        val (half, cal) = Levels.autoLevels(List(150) { -60.0 }, lv, s)
+        assertEquals(0.5, cal!!.weight, 1e-9)
+        assertEquals(false, cal.complete)
+        assertEquals(listOf(-120.0, -49.0, -42.8, -36.7, -31.0), half.map { it.db })
+        // later history moves the thresholds again: e.g. the room turned out quieter
+        val later = Levels.autoLevels(List(300) { -60.0 } + List(300) { -75.0 }, lv, s)
+        assertEquals(-75.0, later.second!!.floorDb, 0.0)
+        assertEquals(true, later.second!!.complete)
+    }
+
+    @Test
+    fun sensitivityShiftsThresholds() {
+        val lv = Levels.parse(Levels.DEFAULT)
+        assertEquals(listOf(-120.0, -52.0, -45.0, -38.0, -32.0), Levels.withSensitivity(lv, 2).map { it.db })
+        assertEquals(listOf(-120.0, -37.0, -30.0, -23.0, -17.0), Levels.withSensitivity(lv, -9).map { it.db })
+        assertEquals(lv, Levels.withSensitivity(lv, 0))
     }
 
     @Test

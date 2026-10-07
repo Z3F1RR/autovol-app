@@ -161,6 +161,7 @@ class AutoVolService : Service() {
                 samples = engine.history.size,
                 calFloor = st.cal?.floorDb,
                 calTop = st.cal?.topDb,
+                calWeight = st.cal?.weight ?: 0.0,
             ),
         )
         // The service may have been stopped while measuring: do not resurrect its notification.
@@ -178,7 +179,7 @@ class AutoVolService : Service() {
     }
 
     companion object {
-        private const val EXTRA_FROM_UI = "from_ui"
+        internal const val EXTRA_FROM_UI = "from_ui"
         private const val EXTRA_REASON = "reason"
         private const val WAKE_MS = 60_000L
         const val REASON_BOOT = "загрузка"

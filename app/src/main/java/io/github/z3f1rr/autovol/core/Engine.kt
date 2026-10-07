@@ -17,6 +17,10 @@ class EngineState {
     var cal: CalInfo? = null
     var levels: List<Level> = emptyList()
 
+    /** Media volume we set last; null = not ours (muted/maximum by the user, or never set). Survives pauses. */
+    var mediaLastSet: Int? = null
+    var mediaOverrideUntilMs: Long = 0
+
     fun resync() {
         step = null
         lastSet.clear()
@@ -95,6 +99,7 @@ class Engine(
             st.overrideUntilMs = now + s.overrideMin * 60_000L
             return skip(idle, "громкость изменена вручную — пауза ${s.overrideMin} мин")
         }
+        if (s.mediaEnabled) checkMediaOverride(s, now)
         val chkPlay = s.pauseOnMedia
 
         /** One clean measurement: (db, null) or (null, skip reason). */
@@ -114,7 +119,8 @@ class Engine(
         val (db0, why) = sample()
         if (db0 == null) return skip(fast, why!!)
         var db: Double = db0
-        val (lv, cal) = Levels.autoLevels(history.values(), s.levels, s)
+        val (calibrated, cal) = Levels.autoLevels(history.values(), s.levels, s)
+        val lv = Levels.withSensitivity(calibrated, s.ringSens)
         st.cal = cal
         st.levels = lv
         var up = Levels.stepOf(db, lv)
@@ -184,6 +190,7 @@ class Engine(
             val v = cur[str]!!
             st.lastSet[str] = p.volume(str)?.cur ?: Levels.targetVol(pct, v.min, v.max, s.minVol)
         }
+        if (s.mediaEnabled) applyMedia(s, now, lv, new, changed)
         if (changed.isNotEmpty()) {
             st.lastChangeMs = now
             if (p.ringerNotNormal() != null) p.log("ВНИМАНИЕ: после изменения громкости сменился режим звонка")
@@ -196,13 +203,51 @@ class Engine(
             if (now - st.lastChangeMs < s.stableMin * 60_000L) fast else slow
         }
         val note = "${f1(db)} дБ → ступень $new ($pct%)" +
-            (if (cal != null) "" else " [ручные пороги]") +
+            calNote(cal) +
             (if (changed.isNotEmpty()) " изменено " + changed.joinToString(" ") else "") +
             extra
         return CycleResult(wait, note, Outcome.APPLIED)
     }
 
+    /** The user moved the media slider since we set it: leave media alone for OVERRIDE_MIN. */
+    private fun checkMediaOverride(s: Settings, now: Long) {
+        val set = state.mediaLastSet ?: return
+        val v = p.volume(Stream.MEDIA) ?: return
+        if (v.cur != set) {
+            state.mediaLastSet = null
+            state.mediaOverrideUntilMs = now + s.overrideMin * 60_000L
+            p.log("громкость мультимедиа изменена вручную — не трогаю ${s.overrideMin} мин")
+        }
+    }
+
+    /**
+     * Media follows the ringer step shifted by [Settings.mediaSens] steps. Muted media (0) and media
+     * the user turned all the way up stay as they are.
+     */
+    private fun applyMedia(s: Settings, now: Long, lv: List<Level>, ringStep: Int, changed: MutableList<String>) {
+        val st = state
+        if (now < st.mediaOverrideUntilMs) return
+        val v = p.volume(Stream.MEDIA) ?: return
+        if (v.cur == 0 || (v.cur == v.max && st.mediaLastSet != v.cur)) {
+            st.mediaLastSet = null
+            return
+        }
+        val step = (ringStep + s.mediaSens).coerceIn(0, lv.size - 1)
+        val t = Levels.targetVol(lv[step].pct, v.min, v.max, 1)
+        if (t != v.cur) {
+            p.setVolume(Stream.MEDIA, t)
+            changed += "${streamName(Stream.MEDIA)}:${v.cur}→$t"
+        }
+        st.mediaLastSet = p.volume(Stream.MEDIA)?.cur ?: t
+    }
+
     companion object {
+        fun calNote(cal: CalInfo?): String = when {
+            cal == null -> " [ручные пороги]"
+            !cal.complete -> " [калибровка ${(cal.weight * 100).toInt()}%]"
+            else -> ""
+        }
+
         fun f1(x: Double): String = String.format(Locale.ROOT, "%.1f", x)
 
         fun hhmm(ms: Long): String =
@@ -211,6 +256,7 @@ class Engine(
         fun streamName(s: Stream) = when (s) {
             Stream.RING -> "звонок"
             Stream.NOTIFICATION -> "уведомл."
+            Stream.MEDIA -> "медиа"
         }
     }
 }

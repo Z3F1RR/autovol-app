@@ -27,6 +27,7 @@ import io.github.z3f1rr.autovol.AutoVol
 import io.github.z3f1rr.autovol.AutoVolService
 import io.github.z3f1rr.autovol.BuildConfigInfo
 import io.github.z3f1rr.autovol.MicAccess
+import io.github.z3f1rr.autovol.Root
 import io.github.z3f1rr.autovol.Scheduler
 import io.github.z3f1rr.autovol.core.Levels
 
@@ -74,7 +75,8 @@ private fun systemInfo(ctx: Context): String {
     return "точные будильники: ${yn(Scheduler.canExact(ctx))}" +
         " · батарея без ограничений: ${yn(pm.isIgnoringBatteryOptimizations(ctx.packageName))}" +
         " · bucket: $bucket" +
-        " · опоздание будильника: ${AutoVolService.lastLateSec} с (макс. ${AutoVolService.maxLateSec} с)"
+        " · опоздание будильника: ${AutoVolService.lastLateSec} с (макс. ${AutoVolService.maxLateSec} с)" +
+        " · root: ${Root.managerName(ctx) ?: "нет"}${if (AutoVol.prefs.rootGranted) ", использован" else ""}"
 }
 
 private fun share(ctx: Context) {
@@ -88,6 +90,10 @@ private fun share(ctx: Context) {
         )
         appendLine(systemInfo(ctx))
         appendLine("пороги сейчас: ${Levels.format(st.levels.ifEmpty { s.levels })}")
+        appendLine(
+            "чувствительность: звонок ${s.ringSens}, медиа ${if (s.mediaEnabled) s.mediaSens.toString() else "выкл"}" +
+                " · повторный звонок: ${AutoVol.prefs.repeat.let { if (it.enabled) "${it.mode}, ${it.windowMin} мин" else "выкл" }}",
+        )
         appendLine("замер: ${AutoVol.platform.meter.diagnostics()}")
         appendLine()
     }

@@ -32,4 +32,17 @@ data class Settings(
     val calStart: Int = 8,
     val calMinSpan: Int = 24,
     val calMaxSpan: Int = 40,
-)
+    /** Calibration starts blending into the thresholds after this many samples. */
+    val calWarmup: Int = 30,
+    /** Ringer/notification sensitivity, -3..+3: each notch moves the thresholds by [SENS_DB_PER_NOTCH]. */
+    val ringSens: Int = 0,
+    /** Also regulate media volume (only while it is neither muted nor set to maximum by the user). */
+    val mediaEnabled: Boolean = false,
+    /** Media sensitivity, -3..+3 steps relative to the ringer step. */
+    val mediaSens: Int = 0,
+) {
+    companion object {
+        const val SENS_MAX = 3
+        const val SENS_DB_PER_NOTCH = 3.0
+    }
+}

@@ -6,8 +6,13 @@ import kotlin.math.min
 /** One volume step: noise threshold in dBFS and ringer volume percent. */
 data class Level(val db: Double, val pct: Int)
 
-/** Result of auto-calibration: silence floor, top of the scale and history size. */
-data class CalInfo(val floorDb: Double, val topDb: Double, val samples: Int)
+/**
+ * Result of auto-calibration: silence floor, top of the scale, history size and how much of the
+ * thresholds comes from the history (0..1; 1 once [Settings.calMinSamples] are collected).
+ */
+data class CalInfo(val floorDb: Double, val topDb: Double, val samples: Int, val weight: Double = 1.0) {
+    val complete: Boolean get() = weight >= 1.0
+}
 
 object Levels {
     const val DEFAULT = "-120:0 -46:25 -39:50 -32:75 -26:100"
@@ -47,22 +52,34 @@ object Levels {
     /**
      * Port of auto_levels(): thresholds from measurement history. Silence = [floorPct] percentile,
      * top = 97th percentile, top - silence clamped to [minSpan..maxSpan]. Percents stay from [lv].
+     *
+     * Calibration runs continuously over the rolling [Settings.calDays] window. Unlike the script it
+     * does not wait for [Settings.calMinSamples]: from [Settings.calWarmup] samples on, the automatic
+     * thresholds are blended into the manual ones in proportion to the history size.
      */
     fun autoLevels(history: List<Double>, lv: List<Level>, s: Settings): Pair<List<Level>, CalInfo?> {
-        if (!s.autoCal || history.size < s.calMinSamples || lv.size < 2) return lv to null
+        if (!s.autoCal || history.size < s.calWarmup || lv.size < 2) return lv to null
         val xs = history.sorted()
         val floor = percentile(xs, s.calFloorPct)
         val top = percentile(xs, 97)
         val span = min(max(top - floor, s.calMinSpan.toDouble()), s.calMaxSpan.toDouble())
         val start = s.calStart.toDouble()
         val n = lv.size - 1
+        val w = min(1.0, history.size.toDouble() / max(1, s.calMinSamples))
         val out = ArrayList<Level>(lv.size)
         out += Level(-120.0, lv[0].pct)
         for (k in 1..n) {
             val th = floor + start + (span - start) * (k - 1) / max(1, n - 1)
-            out += Level(round1(th), lv[k].pct)
+            out += Level(round1(lv[k].db * (1 - w) + th * w), lv[k].pct)
         }
-        return out to CalInfo(round1(floor), round1(floor + span), history.size)
+        return out to CalInfo(round1(floor), round1(floor + span), history.size, w)
+    }
+
+    /** Ringer sensitivity: a positive value lowers the thresholds (volume rises in quieter places). */
+    fun withSensitivity(lv: List<Level>, notches: Int): List<Level> {
+        if (notches == 0) return lv
+        val shift = notches.coerceIn(-Settings.SENS_MAX, Settings.SENS_MAX) * Settings.SENS_DB_PER_NOTCH
+        return lv.mapIndexed { i, l -> if (i == 0) l else l.copy(db = round1(l.db - shift)) }
     }
 
     /** Python 3 round(): half to even. */

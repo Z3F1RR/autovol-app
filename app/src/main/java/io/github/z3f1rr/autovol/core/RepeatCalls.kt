@@ -11,7 +11,8 @@ enum class RepeatMode {
 data class RepeatSettings(
     val enabled: Boolean = false,
     val mode: RepeatMode = RepeatMode.SAME_NUMBER,
-    val windowMin: Int = 15,
+    /** A repeat call counts right away and up to this many minutes after the missed one. */
+    val windowMin: Int = 30,
 )
 
 /** A call that rang and was not answered (missed or rejected). */

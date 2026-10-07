@@ -16,11 +16,21 @@ object AutoVol {
     lateinit var log: EventLog
         private set
 
-    val platform: AndroidPlatform by lazy { AndroidPlatform(app) }
+    @Volatile
+    private var platformInstance: AndroidPlatform? = null
 
-    val engine: Engine by lazy {
-        Engine(platform, History(FileHistoryStore(app)))
-    }
+    @Volatile
+    private var engineInstance: Engine? = null
+
+    val platform: AndroidPlatform
+        get() = platformInstance ?: synchronized(this) {
+            platformInstance ?: AndroidPlatform(app).also { platformInstance = it }
+        }
+
+    val engine: Engine
+        get() = engineInstance ?: synchronized(this) {
+            engineInstance ?: Engine(platform, History(FileHistoryStore(app))).also { engineInstance = it }
+        }
 
     private val _status = MutableStateFlow(Status())
     val status: StateFlow<Status> = _status.asStateFlow()
@@ -30,6 +40,10 @@ object AutoVol {
 
     fun init(context: Context) {
         app = context.applicationContext
+        // Re-initialised per Application instance (matters for Robolectric, harmless in production).
+        platformInstance = null
+        engineInstance = null
+        _serviceRunning.value = false
         prefs = Prefs(app)
         log = EventLog(app)
         _status.value = prefs.loadStatus()

@@ -8,7 +8,11 @@ class FakePlatform : Platform {
     var external: String? = null
     var car = false
     var battery = Battery(80, false)
-    val volumes = mutableMapOf(Stream.RING to Volume(8, 0, 15), Stream.NOTIFICATION to Volume(8, 0, 15))
+    val volumes = mutableMapOf(
+        Stream.RING to Volume(8, 0, 15),
+        Stream.NOTIFICATION to Volume(8, 0, 15),
+        Stream.MEDIA to Volume(10, 0, 30),
+    )
     val measurements = ArrayDeque<Measurement>()
 
     /** Values returned by successive playing() calls; empty = nothing plays. */
@@ -24,6 +28,11 @@ class FakePlatform : Platform {
 
     fun ring() = volumes[Stream.RING]!!.cur
     fun notif() = volumes[Stream.NOTIFICATION]!!.cur
+    fun media() = volumes[Stream.MEDIA]!!.cur
+
+    fun userSetsMedia(v: Int) {
+        volumes[Stream.MEDIA] = volumes[Stream.MEDIA]!!.copy(cur = v)
+    }
 
     /** The user moves the ringer volume slider. */
     fun userSets(v: Int) {
