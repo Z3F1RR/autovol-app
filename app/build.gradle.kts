@@ -12,8 +12,8 @@ val hasSigningKey = keystoreFile != null && file(keystoreFile).exists() &&
     keystorePassword != null && keyAliasName != null
 
 // Release version: bump both for every release (F-Droid builds from these values).
-val appVersionName = "1.0.0"
-val appVersionCode = 10000 // major * 10000 + minor * 100 + patch
+val appVersionName = "1.0.1"
+val appVersionCode = 10001 // major * 10000 + minor * 100 + patch
 
 // CI builds of branches get "-dev.N" (same versionCode, so they install over each other and the
 // in-app updater offers the release); tag builds must match appVersionName.
