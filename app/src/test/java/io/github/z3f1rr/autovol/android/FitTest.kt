@@ -1,5 +1,8 @@
 package io.github.z3f1rr.autovol.android
 
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
@@ -90,5 +93,12 @@ class FitTest {
         val bottomDp = (node.positionInRoot.y + node.size.height) / density
         // the last card ends close to the bottom (only its padding + the bottom gap remain)
         assertTrue("content ends at $bottomDp dp of 995", bottomDp > 995 - 70 && bottomDp <= 995)
+        // touching the chart shows the nearest measurement
+        compose.onNodeWithContentDescription("График уровня шума", substring = true)
+            .performTouchInput { down(Offset(width * 0.55f, height / 2f)) }
+        compose.waitForIdle()
+        compose.onRoot().captureRoboImage(
+            System.getProperty("roborazzi.outputDir", "build/outputs/roborazzi") + "/main_tall_chart_touch_ru.png",
+        )
     }
 }

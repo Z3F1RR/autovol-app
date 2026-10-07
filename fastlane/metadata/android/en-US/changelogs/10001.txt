@@ -1,1 +1,0 @@
-• Fixed the “Saturation” label wrapping in the colour settings.

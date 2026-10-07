@@ -278,34 +278,37 @@ private fun CalibrationSection(st: Status) {
     }
 }
 
-/** Learning from manual ringer changes: switch, what was learned, forget. */
+/** Learning from manual ringer and media changes: switch, what was learned, forget. */
 @Composable
 private fun LearningRows() {
     val prefs = AutoVol.prefs
     val on by prefs.learnFromManual.flow.collectAsStateWithLifecycle()
     val bias by prefs.learnedBias.flow.collectAsStateWithLifecycle()
+    val mediaBias by prefs.learnedMediaPct.flow.collectAsStateWithLifecycle()
     SwitchRow(stringResource(R.string.learn_title), stringResource(R.string.learn_sub), on) {
         prefs.learnFromManual.value = it
     }
+    @Composable
+    fun part(res: Int, x: Double) = stringResource(
+        res,
+        (if (x > 0) "+" else "−") + String.format(java.util.Locale.ROOT, "%.1f", kotlin.math.abs(x)).removeSuffix(".0"),
+        stringResource(if (x > 0) R.string.learn_louder else R.string.learn_quieter),
+    )
+    val parts = buildList {
+        if (bias != 0.0) add(part(R.string.learn_value, bias))
+        if (mediaBias != 0.0) add(part(R.string.learn_media_value, mediaBias))
+    }
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
-            if (bias == 0.0) {
-                stringResource(R.string.learn_none)
-            } else {
-                stringResource(
-                    R.string.learn_value,
-                    (if (bias > 0) "+" else "−") + String.format(java.util.Locale.ROOT, "%.1f", kotlin.math.abs(bias)),
-                    stringResource(if (bias > 0) R.string.learn_louder else R.string.learn_quieter),
-                )
-            },
+            if (parts.isEmpty()) stringResource(R.string.learn_none) else parts.joinToString("\n"),
             color = Oos.TextSecondary,
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.weight(1f),
         )
-        if (bias != 0.0) {
+        if (parts.isNotEmpty()) {
             TextButton(onClick = {
                 AutoVol.engine.resetLearning()
-                AutoVol.log.add("поправка по ручным изменениям сброшена")
+                AutoVol.log.add("поправки по ручным изменениям сброшены")
                 AutoVolService.instance?.requestCycle()
             }) { Text(stringResource(R.string.learn_reset)) }
         }
