@@ -62,6 +62,19 @@ jobs:
           name: autovol-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
 
+      # Phone-friendly download: the latest branch build as the "dev" pre-release
+      # (the in-app updater ignores pre-releases).
+      - name: Dev pre-release
+        if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk AutoVol-dev.apk
+          gh release delete dev --yes --cleanup-tag || true
+          gh release create dev AutoVol-dev.apk --prerelease --target "$GITHUB_SHA" \
+            --title "Тестовая сборка (dev)" \
+            --notes "Сборка ветки ${GITHUB_REF_NAME}, запуск ${GITHUB_RUN_NUMBER}, коммит ${GITHUB_SHA::7}. Для проверки перед релизом."
+
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
