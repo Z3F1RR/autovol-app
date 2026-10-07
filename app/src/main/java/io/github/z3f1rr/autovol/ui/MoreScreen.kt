@@ -219,7 +219,7 @@ private fun ColorEditor(argb: Int, onChange: (Int) -> Unit) {
 @Composable
 private fun ColorSlider(label: String, value: Float, range: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit, onDone: () -> Unit) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.width(112.dp))
+        Text(label, style = MaterialTheme.typography.bodyLarge, maxLines = 1, softWrap = false, modifier = Modifier.width(136.dp))
         Slider(value = value, onValueChange = onChange, onValueChangeFinished = onDone, valueRange = range, modifier = Modifier.weight(1f))
     }
 }

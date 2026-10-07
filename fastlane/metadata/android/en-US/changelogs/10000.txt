@@ -1,8 +1,6 @@
-First release.
-• Ring and notification volume by ambient noise (dBA), spike filtering, continuous calibration.
-• Learns from your manual volume changes.
-• Optional media volume and full volume for repeat calls.
-• Pauses in vibrate, DND, calls, headphones/Bluetooth, car mode, low battery.
-• Optional root: autostart after reboot.
-• 6-hour noise chart, themes, custom accent, English and Russian.
-• In-app updates from GitHub Releases.
+First version.
+• Ring and notification volume follows the noise around you.
+• Ignores one-off sounds and remembers when you turn the volume up or down yourself.
+• Changes nothing on silent or vibrate, in Do Not Disturb, during calls, with headphones or in the car.
+• Optional: media volume; full volume when someone calls back after a missed call.
+• New versions arrive right in the app.

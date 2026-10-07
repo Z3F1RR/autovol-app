@@ -3,9 +3,14 @@ name: build
 on:
   push:
     branches: ['**']
-    tags: ['v*']
+    tags: ['v*', '[0-9]*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Тег уже созданного релиза, например 1.0.0 — собрать для него APK. Пусто — обычная сборка.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -14,8 +19,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # Release build: a pushed version tag (v1.2.3 or 1.2.3) or a manual run for an existing release.
+      RELEASE_TAG: ${{ github.event.inputs.release_tag || (github.ref_type == 'tag' && github.ref_name) || '' }}
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.release_tag || github.ref }}
 
       - uses: actions/setup-java@v6
         with:
@@ -62,18 +74,16 @@ jobs:
           name: autovol-debug-${{ github.run_number }}
           path: app/build/outputs/apk/debug/*.apk
 
-      # Phone-friendly download: the latest branch build as the "dev" pre-release
-      # (the in-app updater ignores pre-releases).
-      - name: Dev pre-release
-        if: github.event_name != 'pull_request' && !startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # Test build for the phone while work is in progress (not from main, not for releases).
+      # Every release deletes it again; the in-app updater ignores pre-releases.
+      - name: Test pre-release
+        if: github.event_name == 'push' && github.ref_type == 'branch' && github.ref_name != 'main'
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk AutoVol-dev.apk
+          cp app/build/outputs/apk/debug/app-debug.apk AutoVol-test.apk
           gh release delete dev --yes --cleanup-tag || true
-          gh release create dev AutoVol-dev.apk --prerelease --target "$GITHUB_SHA" \
-            --title "Тестовая сборка (dev)" \
-            --notes "Сборка ветки ${GITHUB_REF_NAME}, запуск ${GITHUB_RUN_NUMBER}, коммит ${GITHUB_SHA::7}. Для проверки перед релизом."
+          gh release create dev AutoVol-test.apk --prerelease --target "$GITHUB_SHA" \
+            --title "Тестовая сборка" \
+            --notes "Для проверки перед выходом новой версии. Обычным пользователям нужен последний релиз, а не эта сборка."
 
       - uses: actions/upload-artifact@v7
         if: failure()
@@ -82,7 +92,7 @@ jobs:
           path: app/build/reports/
 
       - name: Release APK
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: env.RELEASE_TAG != ''
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
@@ -90,25 +100,30 @@ jobs:
           if [ -z "$KEYSTORE_FILE" ]; then echo "::error::Для релиза нужны секреты подписи (docs/SIGNING.md)"; exit 1; fi
           name=$(sed -n 's/^val appVersionName = "\(.*\)"/\1/p' app/build.gradle.kts)
           code=$(sed -n 's/^val appVersionCode = \([0-9]*\).*/\1/p' app/build.gradle.kts)
-          if [ "v$name" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Тег $GITHUB_REF_NAME не совпадает с appVersionName $name в app/build.gradle.kts"; exit 1
+          if [ "${RELEASE_TAG#v}" != "$name" ]; then
+            echo "::error::Тег $RELEASE_TAG не совпадает с версией $name в app/build.gradle.kts"; exit 1
           fi
-          ./gradlew --stacktrace assembleRelease
-          apk="AutoVol-${GITHUB_REF_NAME}.apk"
-          mv app/build/outputs/apk/release/app-release.apk "$apk"
-          sha256sum "$apk" > "$apk.sha256"
-          {
-            cat "fastlane/metadata/android/ru-RU/changelogs/$code.txt"
-            printf '\n---\n\n'
-            cat "fastlane/metadata/android/en-US/changelogs/$code.txt"
-            printf '\n\nSHA-256: %s\n' "$(cut -d' ' -f1 "$apk.sha256")"
-          } > release-notes.md
+          # a manual run is not a tag ref: tell Gradle it is a release version anyway
+          GITHUB_REF_TYPE=tag ./gradlew --stacktrace assembleRelease
+          mv app/build/outputs/apk/release/app-release.apk "AutoVol-$name.apk"
+          # release text from the commit this workflow runs for (a manual run for an older tag gets
+          # the current wording), falling back to the checked-out tag
+          git fetch -q --depth 1 origin "$GITHUB_SHA" || true
+          notes() { git show "$GITHUB_SHA:fastlane/metadata/android/$1/changelogs/$code.txt" 2>/dev/null ||
+            cat "fastlane/metadata/android/$1/changelogs/$code.txt"; }
+          { notes ru-RU; printf '\n---\n\n'; notes en-US; } > release-notes.md
+          echo "APK=AutoVol-$name.apk" >> "$GITHUB_ENV"
+          echo "VERSION=$name" >> "$GITHUB_ENV"
 
-      - name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v3
-        with:
-          files: |
-            AutoVol-${{ github.ref_name }}.apk
-            AutoVol-${{ github.ref_name }}.apk.sha256
-          body_path: release-notes.md
+      - name: Publish release
+        if: env.RELEASE_TAG != ''
+        run: |
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$APK" --clobber
+            gh release edit "$RELEASE_TAG" --title "AutoVol $VERSION" --notes-file release-notes.md --prerelease=false --draft=false --latest
+          else
+            gh release create "$RELEASE_TAG" "$APK" --title "AutoVol $VERSION" --notes-file release-notes.md --latest
+          fi
+          # old test builds are not needed once a version is out
+          gh release list --limit 100 --json tagName,isPrerelease --jq '.[] | select(.isPrerelease) | .tagName' |
+            while read -r tag; do gh release delete "$tag" --yes --cleanup-tag; done
