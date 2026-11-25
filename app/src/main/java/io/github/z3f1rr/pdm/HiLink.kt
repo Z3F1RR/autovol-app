@@ -18,6 +18,8 @@ data class ModemState(
     val cell: String = "",
     val dlMbps: Double = 0.0,
     val ulMbps: Double = 0.0,
+    /** Unread SMS on the SIM. */
+    val unread: Int = 0,
 ) {
     /** 0..4 bars from RSRP and SINR. */
     val quality: Int
@@ -91,6 +93,7 @@ class HiLink(private val ip: String, private val network: Network?) {
         val st = g("/api/monitoring/status")
         val plmn = g("/api/net/current-plmn")
         val tr = g("/api/monitoring/traffic-statistics")
+        val notif = g("/api/monitoring/check-notifications")
         val nt = tag(st, "CurrentNetworkTypeEx") ?: tag(st, "CurrentNetworkType") ?: ""
         return ModemState(
             ok = true,
@@ -105,7 +108,55 @@ class HiLink(private val ip: String, private val network: Network?) {
             cell = tag(sig, "cell_id") ?: "",
             dlMbps = (num(tag(tr, "CurrentDownloadRate")) ?: 0) * 8 / 1e6,
             ulMbps = (num(tag(tr, "CurrentUploadRate")) ?: 0) * 8 / 1e6,
+            unread = num(tag(notif, "UnreadMessage")) ?: 0,
         )
+    }
+
+    /** Sends a USSD code (e.g. *100#) and waits up to ~24 s for the operator's answer. */
+    fun ussd(code: String): String {
+        post("/api/ussd/send", "<content>${esc(code)}</content><codeType>CodeType</codeType><timeout></timeout>")
+        repeat(12) {
+            Thread.sleep(2000)
+            val x = try { get("/api/ussd/get", token().first) } catch (e: Exception) { "" }
+            tag(x, "content")?.let { return unesc(it).trim() }
+        }
+        throw IllegalStateException("оператор не ответил на $code")
+    }
+
+    data class Sms(val index: Int, val phone: String, val text: String, val date: String, val unread: Boolean)
+
+    /** Inbox, newest first. */
+    fun sms(count: Int = 20): List<Sms> {
+        val x = post(
+            "/api/sms/sms-list",
+            "<PageIndex>1</PageIndex><ReadCount>$count</ReadCount><BoxType>1</BoxType><SortType>0</SortType>" +
+                "<Ascending>0</Ascending><UnreadPreferred>0</UnreadPreferred>",
+        )
+        return Regex("<Message>(.*?)</Message>", RegexOption.DOT_MATCHES_ALL).findAll(x).mapNotNull { m ->
+            val b = m.groupValues[1]
+            val i = num(tag(b, "Index")) ?: return@mapNotNull null
+            Sms(i, unesc(tag(b, "Phone") ?: ""), unesc(tag(b, "Content") ?: ""), tag(b, "Date") ?: "", tag(b, "Smstat") == "0")
+        }.toList()
+    }
+
+    fun markRead(index: Int) {
+        post("/api/sms/set-read", "<Index>$index</Index>")
+    }
+
+    /** Current LTE band mask (hex, e.g. 7FFFFFFFFFFFFFFF = all). */
+    fun lteBands(): String {
+        val x = get("/api/net/net-mode", token().first)
+        check(x, "/api/net/net-mode")
+        return tag(x, "LTEBand") ?: throw IllegalStateException("модем не сообщает диапазоны")
+    }
+
+    /** Locks LTE to [mask], keeps the network mode and 2G/3G bands as they are. */
+    fun setLteBands(mask: String) {
+        val x = get("/api/net/net-mode", token().first)
+        check(x, "/api/net/net-mode")
+        val mode = tag(x, "NetworkMode") ?: "00"
+        val band = tag(x, "NetworkBand") ?: "3FFFFFFF"
+        post("/api/net/net-mode", "<NetworkMode>$mode</NetworkMode><NetworkBand>$band</NetworkBand><LTEBand>$mask</LTEBand>")
     }
 
     fun reboot() {
@@ -128,6 +179,11 @@ class HiLink(private val ip: String, private val network: Network?) {
 
         fun tag(xml: String, name: String): String? =
             Regex("<$name>([^<]*)</$name>").find(xml)?.groupValues?.get(1)
+
+        fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        fun unesc(s: String) = s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
+            .replace("&apos;", "'").replace("&#10;", "\n").replace("&amp;", "&")
 
         fun num(s: String?): Int? = s?.let { Regex("-?\\d+").find(it)?.value?.toIntOrNull() }
 

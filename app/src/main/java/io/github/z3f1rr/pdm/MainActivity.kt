@@ -10,7 +10,9 @@ import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
@@ -21,6 +23,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -85,6 +88,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
@@ -155,6 +159,7 @@ class MainActivity : ComponentActivity() {
         }
         if (Monitor.speed.value == null) Monitor.speed.value = Monitor.loadSpeed(this)
         Monitor.ups.value = Monitor.loadUps(this)
+        Ops.loadBalances(this)
         if (getSharedPreferences("pdm", MODE_PRIVATE).getBoolean("auto", true)) MonitorService.start(this)
         setContent {
             MaterialTheme(colorScheme = Scheme, typography = onestTypography()) { Screen() }
@@ -175,6 +180,10 @@ private fun Screen() {
     val cfg = remember(snap) { Monitor.config(ctx) }
     var reboot by remember { mutableStateOf<Int?>(null) }
     var settings by remember { mutableStateOf(false) }
+    var modemSheet by remember { mutableStateOf<Int?>(null) }
+    var routerSheet by remember { mutableStateOf(false) }
+    val router = Ops.router.value
+    val balances = Ops.balances.value
     var refreshing by remember { mutableStateOf(false) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
 
@@ -219,20 +228,15 @@ private fun Screen() {
                 LocalCard(snap?.local, where, Monitor.localHistory.value)
             }
             if (running && where == Where.TRAIN) {
+                if (router != null) RouterCard(router, cfg) { routerSheet = true }
                 cfg.forEachIndexed { i, c ->
-                    ModemCard(
-                        c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(),
-                        onReconnect = { MonitorService.start(ctx, MonitorService.ACTION_RECONNECT, i) },
-                        onReboot = { reboot = i },
-                    )
+                    ModemCard(c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(), balances[i]) { modemSheet = i }
                 }
             }
 
             UpsCard(now)
 
             BatteryHint()
-
-            DiagRow()
         }
     }
 
@@ -254,6 +258,18 @@ private fun Screen() {
     if (settings) {
         ModalBottomSheet(onDismissRequest = { settings = false }, containerColor = C.Surface) {
             SettingsSheet(running) { settings = false }
+        }
+    }
+
+    modemSheet?.let { i ->
+        ModalBottomSheet(onDismissRequest = { modemSheet = null }, containerColor = C.Surface) {
+            ModemSheet(i, cfg[i], snap?.modems?.getOrNull(i)) { modemSheet = null; reboot = i }
+        }
+    }
+
+    if (routerSheet) {
+        ModalBottomSheet(onDismissRequest = { routerSheet = false; Ops.log.value = null }, containerColor = C.Surface) {
+            RouterSheet(Ops.router.value, cfg)
         }
     }
 }
@@ -368,8 +384,7 @@ private fun fmtSpeed(v: Double?) = when {
 // ---------------------------------------------------------------- modem card
 
 @Composable
-private fun ModemCard(c: ModemConfig, m: ModemState?, hist: List<Point>, onReconnect: () -> Unit, onReboot: () -> Unit) {
-    var menu by remember { mutableStateOf(false) }
+private fun ModemCard(c: ModemConfig, m: ModemState?, hist: List<Point>, bal: Balance?, onOpen: () -> Unit) {
     val live = m != null && m.ok && m.connected
     val q = if (live) m!!.quality else 0
     val tone = when {
@@ -378,45 +393,53 @@ private fun ModemCard(c: ModemConfig, m: ModemState?, hist: List<Point>, onRecon
         q == 2 -> C.Amber
         else -> C.Red
     }
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.Surface).padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 18.dp)) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.Surface).clickable(onClick = onOpen).padding(20.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(c.name, color = C.Text, fontFamily = Onest, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(c.name, color = C.Text, fontFamily = Onest, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    if ((m?.unread ?: 0) > 0) {
+                        Spacer(Modifier.width(8.dp))
+                        Badge("${m!!.unread}")
+                    }
+                }
                 Text(
                     when {
                         m == null -> "Ожидание"
                         !m.ok -> "Не отвечает"
                         !m.connected -> "Нет сети"
-                        else -> listOf(m.net, m.band.takeIf { it.isNotEmpty() }?.let { "B$it" }).filterNotNull().joinToString(" · ")
+                        else -> listOfNotNull(m.net, m.band.takeIf { it.isNotEmpty() }?.let { "B$it" }, bal?.rub?.let { rub(it) })
+                            .joinToString(" · ")
                     },
                     color = if (live) C.Text2 else C.Red, style = Num.copy(fontSize = 14.sp),
                 )
             }
             Bars(q, tone)
-            Box {
-                IconButton(onClick = { menu = true }) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "Действия", tint = C.Text3)
-                }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = C.Raised) {
-                    DropdownMenuItem(text = { Text("Переподключить") }, onClick = { menu = false; onReconnect() })
-                    DropdownMenuItem(text = { Text("Перезагрузить", color = C.Red) }, onClick = { menu = false; onReboot() })
-                }
-            }
         }
         if (live) {
             Spacer(Modifier.height(14.dp))
-            Row(Modifier.padding(end = 12.dp)) {
+            Row {
                 Metric(m!!.rsrp?.toString() ?: "—", "RSRP", C.Blue, Modifier.weight(1f))
                 Metric(m.sinr?.toString() ?: "—", "SINR", C.Amber, Modifier.weight(1f))
                 Metric(fmtSpeed(m.dlMbps), "↓ Мбит/с", null, Modifier.weight(1f))
             }
             if (hist.size > 2) {
                 Spacer(Modifier.height(14.dp))
-                Box(Modifier.padding(end = 12.dp)) { Spark(hist) }
+                Spark(hist)
             }
         }
     }
 }
+
+@Composable
+private fun Badge(text: String) {
+    Text(
+        text, color = C.Bg, style = Num.copy(fontSize = 12.sp, fontWeight = FontWeight.SemiBold),
+        modifier = Modifier.clip(RoundedCornerShape(50)).background(C.Blue).padding(horizontal = 7.dp, vertical = 1.dp),
+    )
+}
+
+private fun rub(v: Double) = "%,.0f ₽".format(Locale("ru"), v).replace('\u00a0', ' ')
 
 @Composable
 private fun Metric(value: String, label: String, dot: Color?, modifier: Modifier) {
@@ -674,10 +697,19 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
     val cfg = remember { Monitor.config(ctx) }
     var n0 by remember { mutableStateOf(cfg[0].name) }
     var i0 by remember { mutableStateOf(cfg[0].ip) }
+    var u0 by remember { mutableStateOf(Ops.ussd(ctx, 0)) }
     var n1 by remember { mutableStateOf(cfg[1].name) }
     var i1 by remember { mutableStateOf(cfg[1].ip) }
+    var u1 by remember { mutableStateOf(Ops.ussd(ctx, 1)) }
+    var login by remember { mutableStateOf(Ops.routerLogin(ctx)) }
+    var pass by remember { mutableStateOf(Ops.routerPass(ctx)) }
     var server by remember { mutableStateOf(Monitor.server(ctx)) }
     var interval by remember { mutableStateOf(Monitor.intervalSec(ctx).toString()) }
+    var routeOn by remember { mutableStateOf(Ops.routeLog(ctx)) }
+    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+        // the service re-declares itself with the location type, so coordinates keep coming with the screen off
+        if (running) MonitorService.start(ctx)
+    }
     Column(
         Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -696,26 +728,59 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
         FlagRow("Другие Wi-Fi", "Проверять интернет в любой сети, не только в вагоне", "other_wifi", Monitor.otherWifi(ctx), running)
         FlagRow("Мобильный интернет", "Проверять, когда Wi-Fi нет", "mobile", Monitor.mobile(ctx), running)
         FlagRow("Имя Wi-Fi через root", "KernelSU спросит разрешение один раз", "root_ssid", Monitor.rootSsid(ctx), running)
+        FlagRow("Автолечение модемов", "Нет сети 1,5 мин — переподключить, 5 мин — перезагрузить", "heal", Ops.heal(ctx), running)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) {
+                FlagRow("Журнал сигнала", "Раз в минуту: время, координаты, соты, сигнал", "route_log", routeOn, running) { on ->
+                    routeOn = on
+                    if (on) askLocation.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+                }
+            }
+        }
+        if (routeOn) {
+            Row {
+                Spacer(Modifier.weight(1f))
+                Pill(if ("export" in Ops.busy.value) "Выгружаю…" else "Выгрузить в Загрузки", busy = "export" in Ops.busy.value) {
+                    Ops.run(ctx, "export") { Ops.exportRoute(it) }
+                }
+            }
+        }
+
+        SectionTitle("Сервер и интервал")
         OutlinedTextField(
             server, { server = it.trim() }, label = { Text("Сервер проверки") },
             placeholder = { Text("http://IP:порт/ключ") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            supportingText = { Text("Адрес из установщика на сервере. Без него — проверка по Google и Яндексу, без замера скорости") },
         )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(n0, { n0 = it }, label = { Text("Модем 1") }, singleLine = true, modifier = Modifier.weight(1f))
-            OutlinedTextField(i0, { i0 = it }, label = { Text("Адрес") }, singleLine = true, modifier = Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(n1, { n1 = it }, label = { Text("Модем 2") }, singleLine = true, modifier = Modifier.weight(1f))
-            OutlinedTextField(i1, { i1 = it }, label = { Text("Адрес") }, singleLine = true, modifier = Modifier.weight(1f))
-        }
         OutlinedTextField(
             interval, { interval = it.filter(Char::isDigit).take(3) },
             label = { Text("Проверка раз в, секунд") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
         )
+
+        SectionTitle("Роутер Keenetic")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(login, { login = it }, label = { Text("Логин") }, singleLine = true, modifier = Modifier.weight(1f))
+            OutlinedTextField(
+                pass, { pass = it }, label = { Text("Пароль") }, singleLine = true, modifier = Modifier.weight(1f),
+                visualTransformation = PasswordVisualTransformation(),
+            )
+        }
+
+        SectionTitle("Модемы")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(n0, { n0 = it }, label = { Text("Модем 1") }, singleLine = true, modifier = Modifier.weight(1.2f))
+            OutlinedTextField(i0, { i0 = it }, label = { Text("Адрес") }, singleLine = true, modifier = Modifier.weight(1.2f))
+            OutlinedTextField(u0, { u0 = it }, label = { Text("Баланс") }, singleLine = true, modifier = Modifier.weight(0.9f))
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedTextField(n1, { n1 = it }, label = { Text("Модем 2") }, singleLine = true, modifier = Modifier.weight(1.2f))
+            OutlinedTextField(i1, { i1 = it }, label = { Text("Адрес") }, singleLine = true, modifier = Modifier.weight(1.2f))
+            OutlinedTextField(u1, { u1 = it }, label = { Text("Баланс") }, singleLine = true, modifier = Modifier.weight(0.9f))
+        }
+        Spacer(Modifier.height(6.dp))
         Button(
             onClick = {
                 Monitor.save(ctx, listOf(ModemConfig(n0, i0), ModemConfig(n1, i1)), interval.toIntOrNull() ?: 10, server)
+                Ops.saveRouter(ctx, login, pass, listOf(u0, u1))
                 Monitor.message.value = "Сохранено"
                 if (running) MonitorService.start(ctx)
                 close()
@@ -724,11 +789,14 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = C.Text, contentColor = C.Bg),
         ) { Text("Сохранить", fontFamily = Onest, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
+
+        Spacer(Modifier.height(6.dp))
+        DiagRow()
     }
 }
 
 @Composable
-private fun FlagRow(title: String, hint: String, key: String, initial: Boolean, running: Boolean) {
+private fun FlagRow(title: String, hint: String, key: String, initial: Boolean, running: Boolean, onChange: ((Boolean) -> Unit)? = null) {
     val ctx = LocalContext.current
     var on by remember { mutableStateOf(initial) }
     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -742,9 +810,294 @@ private fun FlagRow(title: String, hint: String, key: String, initial: Boolean, 
                 on = v
                 Monitor.setFlag(ctx, key, v)
                 Monitor.resetPlace()
+                onChange?.invoke(v)
                 if (running) MonitorService.start(ctx)
             },
             colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Bg),
+        )
+    }
+}
+
+// ---------------------------------------------------------------- router
+
+private fun plural(n: Int, one: String, few: String, many: String): String {
+    val d = n % 10
+    val h = n % 100
+    return "$n " + when {
+        d == 1 && h != 11 -> one
+        d in 2..4 && h !in 12..14 -> few
+        else -> many
+    }
+}
+
+private fun fmtBytes(b: Long): String = when {
+    b >= 1_000_000_000L -> "%.1f ГБ".format(Locale("ru"), b / 1e9)
+    b >= 1_000_000L -> "${b / 1_000_000} МБ"
+    else -> "${b / 1000} КБ"
+}
+
+private fun chName(ch: Channel, cfg: List<ModemConfig>) = cfg.getOrNull(ch.modem)?.name ?: ch.iface
+
+@Composable
+private fun RouterCard(r: RouterState, cfg: List<ModemConfig>, onOpen: () -> Unit) {
+    val main = r.channels.firstOrNull { it.main }
+    val active = r.clients.count { it.active }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.Surface).clickable(onClick = onOpen).padding(20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Роутер", color = C.Text, fontFamily = Onest, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            if (r.clients.isNotEmpty()) Text(plural(active, "устройство", "устройства", "устройств"), color = C.Text2, style = Num.copy(fontSize = 14.sp))
+        }
+        if (r.error != null && r.channels.isEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            Text(r.error, color = C.Red, style = MaterialTheme.typography.bodyMedium)
+            return@Column
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text("↓ " + fmtSpeed(r.downMbps), color = C.Text, style = Num.copy(fontSize = 22.sp, fontWeight = FontWeight.SemiBold))
+            Spacer(Modifier.width(14.dp))
+            Text("↑ " + fmtSpeed(r.upMbps), color = C.Text, style = Num.copy(fontSize = 22.sp, fontWeight = FontWeight.SemiBold))
+        }
+        Text(
+            listOfNotNull("Мбит/с", main?.let { "через " + chName(it, cfg) }).joinToString(" · "),
+            color = C.Text3, style = Num.copy(fontSize = 13.sp),
+        )
+        if (r.error != null) Text(r.error, color = C.Amber, style = Num.copy(fontSize = 12.sp))
+    }
+}
+
+@Composable
+private fun SectionTitle(text: String, modifier: Modifier = Modifier) {
+    Text(text, color = C.Text3, fontFamily = Onest, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = modifier.padding(top = 18.dp, bottom = 6.dp))
+}
+
+@Composable
+private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
+    val ctx = LocalContext.current
+    val busy = Ops.busy.value
+    var limitFor by remember { mutableStateOf<Client?>(null) }
+    var confirmReboot by remember { mutableStateOf(false) }
+    var showOffline by remember { mutableStateOf(false) }
+    val log = Ops.log.value
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
+        Text("Роутер", color = C.Text, fontFamily = Onest, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        if (r == null) return@Column
+
+        SectionTitle("Каналы")
+        r.channels.forEach { ch ->
+            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(chName(ch, cfg), color = C.Text, fontFamily = Onest, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                    Text(
+                        listOf(
+                            when { ch.main -> "основной"; !ch.connected -> "нет связи"; else -> "резерв" },
+                            "↓ ${fmtSpeed(ch.downMbps)} ↑ ${fmtSpeed(ch.upMbps)}",
+                            fmtBytes(ch.rxBytes + ch.txBytes),
+                        ).joinToString(" · "),
+                        color = when { ch.main -> C.Green; !ch.connected -> C.Red; else -> C.Text2 },
+                        style = Num.copy(fontSize = 13.sp),
+                    )
+                }
+                if (!ch.main && ch.connected) {
+                    val key = "main:${ch.iface}"
+                    Pill("Сделать основным", busy = key in busy) { Ops.run(ctx, key) { Ops.makeMain(it, ch.iface) } }
+                }
+            }
+        }
+
+        val online = r.clients.filter { it.active }
+        val offline = r.clients.filter { !it.active }
+        SectionTitle("Устройства · ${online.size}")
+        online.forEach { cl -> ClientRow(cl) { limitFor = cl } }
+        if (offline.isNotEmpty()) {
+            Text(
+                if (showOffline) "Скрыть не в сети" else "Не в сети · ${offline.size}",
+                color = C.Text3, fontFamily = Onest, fontSize = 14.sp,
+                modifier = Modifier.clickable { showOffline = !showOffline }.padding(vertical = 10.dp),
+            )
+            if (showOffline) offline.forEach { cl -> ClientRow(cl) { limitFor = cl } }
+        }
+
+        SectionTitle("Журнал")
+        when {
+            log == null -> Pill(if ("log" in busy) "Загружаю…" else "Показать", busy = "log" in busy) { Ops.run(ctx, "log") { Ops.loadLog(it) } }
+            log.isEmpty() -> Text("Событий нет", color = C.Text2, style = MaterialTheme.typography.bodyMedium)
+            else -> log.forEach { l ->
+                Row(Modifier.padding(vertical = 3.dp)) {
+                    Text(l.time.takeLast(8), color = C.Text3, style = Num.copy(fontSize = 12.sp), modifier = Modifier.width(64.dp))
+                    Text(l.text, color = C.Text2, style = Num.copy(fontSize = 12.sp, lineHeight = 16.sp))
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        TextButton(onClick = { confirmReboot = true }) { Text("Перезагрузить роутер", color = C.Red, fontFamily = Onest) }
+    }
+
+    limitFor?.let { cl ->
+        AlertDialog(
+            onDismissRequest = { limitFor = null },
+            containerColor = C.Raised,
+            title = { Text(cl.name) },
+            text = {
+                Column {
+                    Text(listOfNotNull(cl.ip.takeIf { it.isNotEmpty() }, cl.mac.uppercase()).joinToString(" · "), color = C.Text3, style = Num.copy(fontSize = 13.sp))
+                    Spacer(Modifier.height(12.dp))
+                    listOf(null, 1000, 3000, 5000, 10000, 20000).forEach { kbps ->
+                        val sel = cl.limitKbps == kbps
+                        Text(
+                            if (kbps == null) "Без ограничения" else "${kbps / 1000} Мбит/с",
+                            color = if (sel) C.Blue else C.Text, fontFamily = Onest, fontSize = 16.sp,
+                            fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                                .clickable {
+                                    Ops.run(ctx, "limit:${cl.mac}") { Ops.limit(it, cl.mac, kbps) }
+                                    limitFor = null
+                                }
+                                .padding(vertical = 12.dp, horizontal = 4.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { limitFor = null }) { Text("Отмена", color = C.Text2) } },
+        )
+    }
+
+    if (confirmReboot) {
+        AlertDialog(
+            onDismissRequest = { confirmReboot = false },
+            containerColor = C.Raised,
+            title = { Text("Перезагрузить роутер?") },
+            text = { Text("Wi-Fi и интернет в вагоне пропадут на 2–3 минуты.", color = C.Text2) },
+            confirmButton = {
+                TextButton(onClick = { Ops.run(ctx, "reboot") { Ops.rebootRouter(it) }; confirmReboot = false }) {
+                    Text("Перезагрузить", color = C.Red)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmReboot = false }) { Text("Отмена", color = C.Text2) } },
+        )
+    }
+}
+
+@Composable
+private fun ClientRow(cl: Client, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(cl.name, color = if (cl.active) C.Text else C.Text3, fontFamily = Onest, fontSize = 15.sp, maxLines = 1)
+            Row {
+                Text(fmtBytes(cl.down + cl.up), color = C.Text3, style = Num.copy(fontSize = 13.sp))
+                cl.limitKbps?.let {
+                    Text(" · ≤ ${it / 1000} Мбит/с", color = C.Amber, style = Num.copy(fontSize = 13.sp))
+                }
+            }
+        }
+        if (cl.active) {
+            val d = cl.downMbps ?: 0.0
+            Text(
+                "↓ " + fmtSpeed(cl.downMbps),
+                color = if (d >= 5) C.Amber else C.Text2,
+                style = Num.copy(fontSize = 15.sp, fontWeight = if (d >= 5) FontWeight.SemiBold else FontWeight.Normal),
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------- modem sheet
+
+@Composable
+private fun ModemSheet(i: Int, c: ModemConfig, m: ModemState?, onReboot: () -> Unit) {
+    val ctx = LocalContext.current
+    val busy = Ops.busy.value
+    val bal = Ops.balances.value[i]
+    val band = Ops.bands.value[i]
+    val sms = Ops.sms.value[i]
+    var confirmBand by remember { mutableStateOf<Pair<String, String>?>(null) }
+    LaunchedEffect(i) {
+        Ops.run(ctx, "bands$i") { Ops.loadBands(it, i) }
+        Ops.run(ctx, "sms$i") { Ops.loadSms(it, i) }
+    }
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
+        Text(c.name, color = C.Text, fontFamily = Onest, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+        if (m != null && m.ok) {
+            Text(
+                listOfNotNull(m.operator.takeIf { it.isNotEmpty() }, m.net, m.band.takeIf { it.isNotEmpty() }?.let { "B$it" }, m.cell.takeIf { it.isNotEmpty() }?.let { "соты $it" })
+                    .joinToString(" · "),
+                color = C.Text2, style = Num.copy(fontSize = 14.sp),
+            )
+        }
+
+        SectionTitle("Баланс")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    bal?.rub?.let { rub(it) } ?: "—",
+                    color = if (bal?.rub != null && bal.rub < 100) C.Red else C.Text,
+                    style = Num.copy(fontSize = 26.sp, fontWeight = FontWeight.SemiBold),
+                )
+                if (bal != null) Text(SimpleDateFormat("d MMM, HH:mm", Locale("ru")).format(Date(bal.time)), color = C.Text3, style = Num.copy(fontSize = 13.sp))
+            }
+            Pill(if ("bal$i" in busy) "Запрос…" else "Обновить", busy = "bal$i" in busy) { Ops.run(ctx, "bal$i") { Ops.balance(it, i) } }
+        }
+        if (bal != null && bal.rub == null && bal.text.isNotEmpty()) {
+            Spacer(Modifier.height(6.dp))
+            Text(bal.text, color = C.Text2, style = MaterialTheme.typography.bodyMedium)
+        }
+
+        SectionTitle("Диапазон LTE")
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            BAND_PRESETS.forEach { (label, mask) ->
+                val sel = band != null && bandsLabel(band) == bandsLabel(mask)
+                Text(
+                    label, color = if (sel) C.Bg else C.Text, fontFamily = Onest, fontSize = 14.sp, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.clip(RoundedCornerShape(50)).background(if (sel) C.Text else C.Raised)
+                        .clickable(enabled = !sel && "setb$i" !in busy) { confirmBand = label to mask }
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+            }
+        }
+        if (band != null && BAND_PRESETS.none { bandsLabel(it.second) == bandsLabel(band) }) {
+            Text("Сейчас: ${bandsLabel(band)}", color = C.Text3, style = Num.copy(fontSize = 13.sp), modifier = Modifier.padding(top = 6.dp))
+        }
+
+        SectionTitle("СМС")
+        when {
+            sms == null -> if ("sms$i" in busy) CircularProgressIndicator(Modifier.size(18.dp), color = C.Text2, strokeWidth = 2.dp)
+            sms.isEmpty() -> Text("Нет сообщений", color = C.Text2, style = MaterialTheme.typography.bodyMedium)
+            else -> sms.take(10).forEach { x ->
+                Column(Modifier.padding(vertical = 6.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        if (x.unread) {
+                            Box(Modifier.size(6.dp).clip(CircleShape).background(C.Blue))
+                            Spacer(Modifier.width(6.dp))
+                        }
+                        Text("${x.phone} · ${x.date.take(16)}", color = C.Text3, style = Num.copy(fontSize = 12.sp))
+                    }
+                    Text(x.text, color = C.Text, style = MaterialTheme.typography.bodyMedium)
+                }
+            }
+        }
+
+        Spacer(Modifier.height(20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Pill("Переподключить", busy = false) { MonitorService.start(ctx, MonitorService.ACTION_RECONNECT, i) }
+            Pill("Перезагрузить", busy = false, onClick = onReboot)
+        }
+    }
+
+    confirmBand?.let { (label, mask) ->
+        AlertDialog(
+            onDismissRequest = { confirmBand = null },
+            containerColor = C.Raised,
+            title = { Text("Диапазон $label?") },
+            text = { Text("Модем переподключится, связь пропадёт на полминуты.", color = C.Text2) },
+            confirmButton = {
+                TextButton(onClick = { Ops.run(ctx, "setb$i") { Ops.setBands(it, i, mask) }; confirmBand = null }) { Text("Включить") }
+            },
+            dismissButton = { TextButton(onClick = { confirmBand = null }) { Text("Отмена", color = C.Text2) } },
         )
     }
 }

@@ -29,6 +29,7 @@ class MonitorService : Service() {
     private val modemLock = Object()
     private val netLock = Object()
     private val upsLock = Object()
+    private val routerLock = Object()
     private val actions = Executors.newSingleThreadExecutor()
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -101,14 +102,13 @@ class MonitorService : Service() {
     }
 
     private fun startLoops() {
-        if (running) return
+        if (running) {
+            // e.g. location was just allowed: re-declare the foreground types
+            try { promote(Monitor.snapshot.value) } catch (_: Exception) {}
+            return
+        }
         try {
-            val n = buildStatus(null)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(ID_STATUS, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
-            } else {
-                startForeground(ID_STATUS, n)
-            }
+            promote(null)
         } catch (e: Exception) {
             // Android refused a background restart: wait until the app is opened again.
             stopSelf()
@@ -119,6 +119,25 @@ class MonitorService : Service() {
         registerNetworkCallback()
         Thread({ loop(modemLock) { pollModems() } }, "pdm-modems").apply { isDaemon = true; start() }
         Thread({ loop(netLock) { checkNet() } }, "pdm-net").apply { isDaemon = true; start() }
+        Thread({ loop(routerLock) { pollRouter() } }, "pdm-router").apply { isDaemon = true; start() }
+        Ops.loadBalances(this)
+    }
+
+    private fun promote(s: Snapshot?) {
+        run {
+            val n = buildStatus(s)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // location type only when allowed: then the route log gets coordinates with the screen off
+                val special = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                try {
+                    startForeground(ID_STATUS, n, if (hasLocation()) special or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else special)
+                } catch (e: SecurityException) {
+                    startForeground(ID_STATUS, n, special)
+                }
+            } else {
+                startForeground(ID_STATUS, n)
+            }
+        }
     }
 
     /** Runs [body] again after the delay it returns (ms); a Wi-Fi change or "refresh" wakes it early. */
@@ -137,6 +156,7 @@ class MonitorService : Service() {
         synchronized(modemLock) { modemLock.notifyAll() }
         synchronized(netLock) { netLock.notifyAll() }
         synchronized(upsLock) { upsLock.notifyAll() }
+        synchronized(routerLock) { routerLock.notifyAll() }
     }
 
     /** Wi-Fi and mobile networks appearing or disappearing wake the loops at once. */
@@ -272,6 +292,9 @@ class MonitorService : Service() {
             }
         }
         modems = states
+        heal(states, now)
+        watchSms(states)
+        logRoute(states, now)
         val hist = synchronized(history) {
             states.forEachIndexed { i, s ->
                 val h = history[i]
@@ -402,7 +425,164 @@ class MonitorService : Service() {
         wake()
     }
 
+    // ---------------------------------------------------------------- router (Keenetic)
+
+    private var lastBalanceTry = 0L
+
+    private fun pollRouter(): Long {
+        val c = current
+        if (c?.where != Where.TRAIN) {
+            Monitor.post { Ops.router.value = null }
+            return 60_000L
+        }
+        val k = Ops.keenetic(this)
+        if (k != null) {
+            val prev = Ops.router.value
+            val next = try {
+                k.poll(prev, Monitor.config(this))
+            } catch (e: Exception) {
+                (prev ?: RouterState()).copy(error = Monitor.short(e).substringAfter(": "))
+            }
+            Monitor.post { Ops.router.value = next }
+        }
+        autoBalance()
+        return Monitor.intervalSec(this) * 1000L
+    }
+
+    /** Balance of every SIM every 6 hours; an alert when it drops below 100 ₽. */
+    private fun autoBalance() {
+        val now = System.currentTimeMillis()
+        if (now - lastBalanceTry < 30 * 60_000) return
+        lastBalanceTry = now
+        modems.forEachIndexed { i, m ->
+            if (!m.ok || !m.connected) return@forEachIndexed
+            val old = Ops.balances.value[i]
+            if (old != null && now - old.time < 6 * 3600_000L) return@forEachIndexed
+            val b = try { Ops.balance(this, i) } catch (e: Exception) { return@forEachIndexed }
+            val name = Monitor.config(this).getOrNull(i)?.name ?: "SIM"
+            if (b.rub != null && b.rub < 100 && (old?.rub == null || old.rub >= 100)) {
+                alert(ID_ALERT + 20 + i, "$name: на балансе ${b.rub.toInt()} ₽", b.text)
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- modem self-healing
+
+    private val badSince = LongArray(2)
+    private val healStep = IntArray(2)
+    private val healAt = LongArray(2)
+
+    /**
+     * A modem that answers but has no mobile connection: after 1.5 min — reconnect, after 5 min — reboot.
+     * After a reboot the next one is allowed in 30 min, so a dead SIM doesn't reboot in circles.
+     */
+    private fun heal(states: List<ModemState>, now: Long) {
+        if (!Ops.heal(this)) return
+        val cfg = Monitor.config(this)
+        for (i in 0 until minOf(2, states.size)) {
+            val m = states[i]
+            if (!m.ok) continue
+            if (m.connected) { badSince[i] = 0; healStep[i] = 0; continue }
+            if (badSince[i] == 0L) badSince[i] = now
+            val bad = now - badSince[i]
+            val name = cfg.getOrNull(i)?.name ?: "Модем"
+            when {
+                healStep[i] == 0 && bad >= 90_000 -> {
+                    healStep[i] = 1; healAt[i] = now
+                    actions.execute {
+                        val ok = try { Ops.modem(this, i).reconnect(); true } catch (e: Exception) { false }
+                        if (ok) alert(ID_ALERT + 10 + i, "$name без сети — переподключил", null)
+                    }
+                }
+                healStep[i] == 1 && bad >= 5 * 60_000 -> {
+                    healStep[i] = 2; healAt[i] = now
+                    actions.execute {
+                        val ok = try { Ops.modem(this, i).reboot(); true } catch (e: Exception) { false }
+                        if (ok) alert(ID_ALERT + 10 + i, "$name без сети — перезагрузил", "Если не поможет, проверьте SIM и баланс")
+                    }
+                }
+                healStep[i] == 2 && now - healAt[i] >= 30 * 60_000 -> { healStep[i] = 0; badSince[i] = now }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- SMS
+
+    private val lastUnread = IntArray(2)
+
+    private fun watchSms(states: List<ModemState>) {
+        for (i in 0 until minOf(2, states.size)) {
+            val m = states[i]
+            if (!m.ok) continue
+            if (m.unread > lastUnread[i]) actions.execute { notifySms(i) }
+            lastUnread[i] = m.unread
+        }
+    }
+
+    private fun notifySms(i: Int) {
+        val list = try { Ops.modem(this, i).sms(5) } catch (e: Exception) { return }
+        val p = getSharedPreferences("pdm", MODE_PRIVATE)
+        val seen = p.getInt("smsn$i", -1)
+        val fresh = list.filter { it.unread && it.index > seen }.maxByOrNull { it.index } ?: return
+        p.edit().putInt("smsn$i", fresh.index).apply()
+        val name = Monitor.config(this).getOrNull(i)?.name ?: "SIM"
+        alert(ID_ALERT + 30 + i, "$name · СМС от ${fresh.phone}", fresh.text)
+    }
+
+    // ---------------------------------------------------------------- signal log along the route
+
+    private var lastRoute = 0L
+    @Volatile private var location: android.location.Location? = null
+    private var locListener: android.location.LocationListener? = null
+
+    private fun hasLocation() =
+        checkSelfPermission(android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
+
+    /** Once a minute on the train: time, coordinates (if allowed) and each modem's cell and signal. */
+    private fun logRoute(states: List<ModemState>, now: Long) {
+        if (!Ops.routeLog(this)) { stopLocation(); return }
+        startLocation()
+        if (now - lastRoute < 60_000) return
+        lastRoute = now
+        try { Ops.appendRoute(this, states, Monitor.config(this).map { it.name }, location) } catch (_: Exception) {}
+    }
+
+    @Suppress("MissingPermission")
+    private fun startLocation() {
+        if (locListener != null || !hasLocation()) return
+        val lm = getSystemService(android.location.LocationManager::class.java) ?: return
+        val l = android.location.LocationListener { location = it }
+        try {
+            for (prov in listOf(android.location.LocationManager.GPS_PROVIDER, android.location.LocationManager.NETWORK_PROVIDER)) {
+                if (lm.allProviders.contains(prov)) {
+                    lm.requestLocationUpdates(prov, 30_000L, 50f, l, android.os.Looper.getMainLooper())
+                    lm.getLastKnownLocation(prov)?.let { if (location == null) location = it }
+                }
+            }
+            locListener = l
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun stopLocation() {
+        val l = locListener ?: return
+        try { getSystemService(android.location.LocationManager::class.java)?.removeUpdates(l) } catch (_: Exception) {}
+        locListener = null
+    }
+
+    private fun alert(id: Int, title: String, text: String?) {
+        val b = Notification.Builder(this, CH_ALERT)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle(title)
+            .setAutoCancel(true)
+            .setContentIntent(openApp())
+        if (!text.isNullOrBlank()) b.setContentText(text).setStyle(Notification.BigTextStyle().bigText(text))
+        try { getSystemService(NotificationManager::class.java).notify(id, b.build()) } catch (_: Exception) {}
+    }
+
     private fun releaseAll() {
+        stopLocation()
         running = false
         wake()
         try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
