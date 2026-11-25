@@ -13,9 +13,6 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
@@ -31,8 +28,8 @@ class MonitorService : Service() {
     private val history = List(2) { ArrayDeque<Point>() }
 
     @Volatile private var running = false
-    @Volatile private var wasOnline: Boolean? = null
-    @Volatile private var downSince: Long? = null
+    @Volatile private var lastNet: Net? = null
+    @Volatile private var since: Long = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -105,19 +102,19 @@ class MonitorService : Service() {
 
     private fun cycle() {
         val cfg = Monitor.config(this)
-        val net = Monitor.wifiNetwork(this)
+        val wifi = Monitor.wifiNetwork(this)
         val states = cfg.map { m ->
             try {
-                HiLink(m.ip, net).read()
+                HiLink(m.ip, wifi).read()
             } catch (e: Exception) {
                 ModemState(ok = false, error = e.javaClass.simpleName)
             }
         }
-        val ms = Monitor.internetMs(net)
-        val online = ms != null
+        val (net, ms) = Monitor.check(wifi)
         val now = System.currentTimeMillis()
-        if (online) downSince = null else if (downSince == null) downSince = now
-        val snap = Snapshot(states, ms, net != null, now, downSince)
+        val prev = lastNet
+        if (prev != net) since = now
+        val snap = Snapshot(states, net, ms, now, since)
 
         states.forEachIndexed { i, s ->
             val h = history[i]
@@ -132,11 +129,10 @@ class MonitorService : Service() {
 
         val nm = getSystemService(NotificationManager::class.java)
         nm.notify(ID_STATUS, buildStatus(snap, null))
-        val was = wasOnline
-        if (was != null && was != online) {
-            nm.notify(ID_ALERT, buildAlert(online, snap))
+        if (prev != null && prev != net && net != Net.NO_WIFI && prev != Net.NO_WIFI) {
+            nm.notify(ID_ALERT, buildAlert(snap))
         }
-        wasOnline = online
+        lastNet = net
     }
 
     private fun modemAction(i: Int, reboot: Boolean) {
@@ -179,18 +175,9 @@ class MonitorService : Service() {
 
     // ---------------------------------------------------------------- notifications
 
-    private fun title(s: Snapshot): String = when {
-        !s.onWifi -> "⚪ Телефон не в Wi-Fi роутера"
-        s.internetMs != null -> "🟢 Интернет есть · ${s.internetMs} мс"
-        else -> "🔴 Интернета нет " + ((System.currentTimeMillis() - (s.downSince ?: s.time)) / 60_000) + " мин"
-    }
-
     private fun buildStatus(s: Snapshot?, text: String?): Notification {
         val cfg = Monitor.config(this)
-        val body = text ?: buildString {
-            s!!.modems.forEachIndexed { i, m -> appendLine(line(cfg[i].name, m)) }
-            append("обновлено " + SimpleDateFormat("HH:mm:ss", Locale.US).format(Date(s.time)))
-        }
+        val body = text ?: s!!.modems.mapIndexed { i, m -> line(cfg[i].name, m) }.joinToString("\n")
         val b = Notification.Builder(this, CH_STATUS)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(if (s == null) "ПДМ-статус" else title(s))
@@ -198,21 +185,21 @@ class MonitorService : Service() {
             .setStyle(Notification.BigTextStyle().bigText(body))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setShowWhen(false)
+            .setShowWhen(s != null)
+            .setWhen(s?.time ?: 0)
             .setContentIntent(openApp())
             .addAction(action("Обновить", Intent(this, MonitorService::class.java), 10))
         cfg.forEachIndexed { i, m ->
             val it = Intent(this, MonitorService::class.java).setAction(ACTION_REBOOT).putExtra(EXTRA_INDEX, i)
-            b.addAction(action("↻ ${m.name}", it, 20 + i))
+            b.addAction(action("Перезапуск ${m.name}", it, 20 + i))
         }
         return b.build()
     }
 
-    private fun buildAlert(online: Boolean, s: Snapshot): Notification =
+    private fun buildAlert(s: Snapshot): Notification =
         Notification.Builder(this, CH_ALERT)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle(if (online) "Интернет появился" else "Интернет пропал")
-            .setContentText(title(s))
+            .setContentTitle(title(s))
             .setAutoCancel(true)
             .setTimeoutAfter(5 * 60_000)
             .setContentIntent(openApp())
@@ -237,15 +224,21 @@ class MonitorService : Service() {
         private const val CH_ALERT = "alert"
         private const val ID_STATUS = 1
         private const val ID_ALERT = 2
-        private val BARS = arrayOf("▁▁▁▁", "▂▁▁▁", "▂▄▁▁", "▂▄▆▁", "▂▄▆█")
+        fun title(s: Snapshot): String {
+            val min = (s.time - s.since) / 60_000
+            return when (s.net) {
+                Net.FULL -> "Интернет есть · ${s.latencyMs} мс"
+                Net.WHITELIST -> "Только белые списки" + if (min > 0) " · $min мин" else ""
+                Net.NONE -> "Нет интернета" + if (min > 0) " · $min мин" else ""
+                Net.NO_WIFI -> "Телефон не в Wi-Fi вагона"
+            }
+        }
 
         fun line(name: String, m: ModemState): String {
-            if (!m.ok) return "$name: модем не отвечает"
-            val head = "$name ${m.net} ${BARS[m.quality]} ${m.qualityWord}"
-            if (!m.connected) return "$head · не подключён"
+            if (!m.ok) return "$name — не отвечает"
+            if (!m.connected) return "$name — нет сети"
             val band = if (m.band.isNotEmpty()) " B${m.band}" else ""
-            return "$head$band · RSRP ${m.rsrp ?: "—"} SINR ${m.sinr ?: "—"} · ↓%.1f ↑%.1f"
-                .format(Locale.US, m.dlMbps, m.ulMbps)
+            return "$name ${m.net}$band · ${m.qualityWord} · ${m.rsrp ?: "—"} дБм / ${m.sinr ?: "—"} дБ"
         }
 
         fun createChannels(ctx: Context) {
@@ -256,7 +249,7 @@ class MonitorService : Service() {
                 },
             )
             nm.createNotificationChannel(
-                NotificationChannel(CH_ALERT, "Интернет пропал / появился", NotificationManager.IMPORTANCE_HIGH).apply {
+                NotificationChannel(CH_ALERT, "Изменение доступа в интернет", NotificationManager.IMPORTANCE_HIGH).apply {
                     enableVibration(true)
                     vibrationPattern = longArrayOf(0, 300, 200, 300)
                 },

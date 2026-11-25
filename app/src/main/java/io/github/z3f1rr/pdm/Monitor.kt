@@ -7,17 +7,21 @@ import android.net.NetworkCapabilities
 import android.os.Handler
 import android.os.Looper
 import androidx.compose.runtime.mutableStateOf
-import java.net.InetSocketAddress
-import java.net.Socket
+import java.net.HttpURLConnection
+import java.net.URL
 
 data class ModemConfig(val name: String, val ip: String)
 
+/** What the router can actually reach right now. */
+enum class Net { FULL, WHITELIST, NONE, NO_WIFI }
+
 data class Snapshot(
     val modems: List<ModemState>,
-    val internetMs: Int?,
-    val onWifi: Boolean,
+    val net: Net,
+    val latencyMs: Int?,
     val time: Long,
-    val downSince: Long?,
+    /** When the current [net] state began. */
+    val since: Long,
 )
 
 /** One point of history: time, RSRP, SINR. */
@@ -43,7 +47,7 @@ object Monitor {
     }
 
     fun intervalSec(ctx: Context): Int =
-        ctx.getSharedPreferences("pdm", Context.MODE_PRIVATE).getInt("interval", 10).coerceIn(3, 120)
+        ctx.getSharedPreferences("pdm", Context.MODE_PRIVATE).getInt("interval", 10).coerceIn(5, 120)
 
     fun save(ctx: Context, modems: List<ModemConfig>, interval: Int) {
         val e = ctx.getSharedPreferences("pdm", Context.MODE_PRIVATE).edit()
@@ -66,15 +70,51 @@ object Monitor {
         }
     }
 
-    /** TCP connect to Yandex DNS (it stays reachable under whitelists) through the router. */
-    fun internetMs(network: Network?): Int? {
+    /**
+     * Real check through the router, over HTTPS so a captive page or a stub answer cannot pass for
+     * internet. Foreign hosts answering → full internet. Only Russian whitelisted sites → whitelist mode.
+     */
+    fun check(network: Network?): Pair<Net, Int?> {
+        if (network == null) return Net.NO_WIFI to null
+        for (url in FULL_URLS) {
+            https(network, url, expect204 = true)?.let { return Net.FULL to it }
+        }
+        for (url in WHITELIST_URLS) {
+            https(network, url, expect204 = false)?.let { return Net.WHITELIST to it }
+        }
+        return Net.NONE to null
+    }
+
+    private val FULL_URLS = listOf(
+        "https://www.google.com/generate_204",
+        "https://cp.cloudflare.com/generate_204",
+    )
+    private val WHITELIST_URLS = listOf(
+        "https://ya.ru/",
+        "https://vk.com/",
+    )
+
+    /** Time of a successful HTTPS answer in ms, or null. Includes DNS through the router. */
+    private fun https(network: Network, url: String, expect204: Boolean): Int? {
         val start = System.nanoTime()
+        val c = try {
+            network.openConnection(URL(url)) as HttpURLConnection
+        } catch (e: Exception) {
+            return null
+        }
         return try {
-            val s: Socket = network?.socketFactory?.createSocket() ?: Socket()
-            s.use { it.connect(InetSocketAddress("77.88.8.8", 53), 3000) }
-            ((System.nanoTime() - start) / 1_000_000).toInt()
+            c.connectTimeout = 4000
+            c.readTimeout = 4000
+            c.useCaches = false
+            c.instanceFollowRedirects = false
+            c.setRequestProperty("User-Agent", "PdmStatus")
+            val code = c.responseCode
+            val ok = if (expect204) code == 204 else code in 200..399
+            if (ok) ((System.nanoTime() - start) / 1_000_000).toInt() else null
         } catch (e: Exception) {
             null
+        } finally {
+            c.disconnect()
         }
     }
 }

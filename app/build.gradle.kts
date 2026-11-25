@@ -19,7 +19,7 @@ android {
         applicationId = "io.github.z3f1rr.pdm"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
+        versionCode = (ciRun?.toIntOrNull() ?: 1)
         versionName = "1.0." + (ciRun ?: "local")
     }
 
@@ -64,4 +64,5 @@ dependencies {
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.material3)
+    implementation(libs.androidx.compose.material.icons.core)
 }
