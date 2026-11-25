@@ -34,7 +34,7 @@ data class Client(
     val downMbps: Double?,
     val upMbps: Double?,
     /** Speed limit in kbit/s, null = not limited. */
-    val limitKbps: Int?,
+    val limitKbps: Limit?,
     /** Registered in the router ("known host"): only those can get a personal limit. */
     val registered: Boolean = false,
 )
@@ -45,10 +45,21 @@ data class RouterState(
     val time: Long = System.currentTimeMillis(),
     val error: String? = null,
     /** Limit for all unregistered devices, kbit/s. */
-    val unknownLimit: Int? = null,
+    val unknownLimit: Limit? = null,
 ) {
     val downMbps: Double? get() = channels.mapNotNull { it.downMbps }.takeIf { it.isNotEmpty() }?.sum()
     val upMbps: Double? get() = channels.mapNotNull { it.upMbps }.takeIf { it.isNotEmpty() }?.sum()
+}
+
+/** Speed limit, kbit/s. Upload is limited separately: LTE upload is narrow, one phone backing up photos clogs it for everyone. */
+data class Limit(val down: Int, val up: Int) {
+    val cli: String get() = "rate $down" + if (up != down) " asymmetric $up" else ""
+    val label: String get() = if (up == down) "${mbit(down)} Мбит/с" else "↓${mbit(down)} ↑${mbit(up)}"
+
+    companion object {
+        fun mbit(k: Int) = if (k % 1000 == 0) "${k / 1000}" else "%.1f".format(java.util.Locale.US, k / 1000.0).trimEnd('0').trimEnd('.')
+        val PRESETS = listOf(Limit(1000, 512), Limit(3000, 1000), Limit(5000, 1000), Limit(10000, 2000), Limit(20000, 3000))
+    }
 }
 
 data class LogLine(val time: String, val text: String)
@@ -184,7 +195,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
         // the running config is large: read limits once a minute, not on every poll
         val cached = limitsCache
         val (limits, unknownLimit) = if (cached != null && now - cached.third < 60_000) cached.first to cached.second
-        else try { limits().also { limitsCache = Triple(it.first, it.second, now) } } catch (e: Exception) { emptyMap<String, Int>() to null }
+        else try { limits().also { limitsCache = Triple(it.first, it.second, now) } } catch (e: Exception) { emptyMap<String, Limit>() to null }
 
         val hs = JSONObject(get("/rci/show/ip/hotspot")).optJSONArray("host") ?: JSONArray()
         // per-device byte counters: "show ip hotspot" has zeros on this firmware, the traffic monitor
@@ -219,7 +230,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
             if (!active && down + up == 0L) continue
             if (active && !registered) toRegister += x
             val shape = h.optJSONObject("traffic-shape")
-            val own = shape?.let { maxOf(it.optInt("rx", 0), it.optInt("tx", 0)) }?.takeIf { it > 0 }
+            val own = shape?.let { Limit(it.optInt("tx", 0), it.optInt("rx", 0)) }?.takeIf { it.down > 0 }
             val old = prev?.clients?.firstOrNull { it.mac == x.mac }
             clients += Client(
                 mac = x.mac,
@@ -229,7 +240,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
                 down = down, up = up,
                 downMbps = if (active) rate(down, old?.down) else null,
                 upMbps = if (active) rate(up, old?.up) else null,
-                limitKbps = own ?: limits[x.mac] ?: if (!registered) unknownLimit else null,
+                limitKbps = limits[x.mac] ?: own ?: if (!registered) unknownLimit else null,
                 registered = registered,
             )
         }
@@ -239,7 +250,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
             toRegister.take(5).forEach { x ->
                 val c = clients.first { it.mac == x.mac }
                 cmds += "known host ${hostName(c)} ${x.mac}"
-                if (unknownLimit != null) cmds += "ip traffic-shape host ${x.mac} rate $unknownLimit"
+                if (unknownLimit != null) cmds += "ip traffic-shape host ${x.mac} ${unknownLimit.cli}"
             }
             try { run(cmds, ignoreErrorsOf = cmds.toSet()) } catch (_: Exception) {}
             limitsCache = null
@@ -290,12 +301,14 @@ class Keenetic(private val gw: String, private val network: Network?, private va
      * Current limits from the running config: per registered device, and the one for all unregistered
      * devices. Lines look like "ip traffic-shape host aa:bb:… rate 5000 [asymmetric 5000]".
      */
-    fun limits(): Pair<Map<String, Int>, Int?> {
+    fun limits(): Pair<Map<String, Limit>, Limit?> {
         limitsCache = null
         val cfg = get("/rci/show/running-config")
-        val hosts = Regex("""ip traffic-shape host ([0-9a-fA-F:]{17}) rate (\d+)""").findAll(cfg)
-            .associate { it.groupValues[1].lowercase() to it.groupValues[2].toInt() }
-        val unknown = Regex("""ip traffic-shape unknown-host rate (\d+)""").find(cfg)?.groupValues?.get(1)?.toInt()
+        fun lim(d: String, u: String) = Limit(d.toInt(), u.toIntOrNull() ?: d.toInt())
+        val hosts = Regex("""ip traffic-shape host ([0-9a-fA-F:]{17}) rate (\d+)(?: asymmetric (\d+))?""").findAll(cfg)
+            .associate { it.groupValues[1].lowercase() to lim(it.groupValues[2], it.groupValues[3]) }
+        val unknown = Regex("""ip traffic-shape unknown-host rate (\d+)(?: asymmetric (\d+))?""").find(cfg)
+            ?.let { lim(it.groupValues[1], it.groupValues[2]) }
         return hosts to unknown
     }
 
@@ -303,23 +316,23 @@ class Keenetic(private val gw: String, private val network: Network?, private va
      * Limit for one device. The router limits only registered devices, so an unregistered one is
      * registered first (it then also stops falling under the "all unregistered" limit).
      */
-    fun limit(c: Client, kbps: Int?) {
+    fun limit(c: Client, kbps: Limit?) {
         val cmds = ArrayList<String>()
         if (!c.registered) cmds += "known host ${hostName(c)} ${c.mac}"
-        cmds += if (kbps == null) "no ip traffic-shape host ${c.mac}" else "ip traffic-shape host ${c.mac} rate $kbps"
+        cmds += if (kbps == null) "no ip traffic-shape host ${c.mac}" else "ip traffic-shape host ${c.mac} ${kbps.cli}"
         run(cmds, ignoreErrorsOf = setOf("no ip traffic-shape host ${c.mac}"))
     }
 
     /** One limit for everyone: every registered device plus the rule for unregistered ones. */
-    fun limitAll(clients: List<Client>, kbps: Int?) {
+    fun limitAll(clients: List<Client>, kbps: Limit?) {
         val cmds = ArrayList<String>()
         if (kbps == null) {
             cmds += "no ip traffic-shape unknown-host"
             cmds += "no ip traffic-shape host"
             run(cmds, ignoreErrorsOf = cmds.toSet())
         } else {
-            cmds += "ip traffic-shape unknown-host rate $kbps"
-            clients.filter { it.registered }.forEach { cmds += "ip traffic-shape host ${it.mac} rate $kbps" }
+            cmds += "ip traffic-shape unknown-host ${kbps.cli}"
+            clients.filter { it.registered }.forEach { cmds += "ip traffic-shape host ${it.mac} ${kbps.cli}" }
             run(cmds, ignoreErrorsOf = emptySet())
         }
     }
@@ -381,7 +394,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
 
     companion object {
         @Volatile private var cookie = ""
-        @Volatile private var limitsCache: Triple<Map<String, Int>, Int?, Long>? = null
+        @Volatile private var limitsCache: Triple<Map<String, Limit>, Limit?, Long>? = null
         @Volatile private var rxIsDown: Boolean? = null
 
         private fun long(o: JSONObject, vararg keys: String): Long {

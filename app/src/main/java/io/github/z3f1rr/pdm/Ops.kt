@@ -156,18 +156,18 @@ object Ops {
         say(ctx, "Основной канал переключён")
     }
 
-    fun limit(ctx: Context, c: Client, kbps: Int?) {
+    fun limit(ctx: Context, c: Client, kbps: Limit?) {
         val k = needKeenetic(ctx)
         k.limit(c, kbps)
         refreshLimits(k)
-        say(ctx, if (kbps == null) "${c.name}: без ограничения" else "${c.name}: до ${kbps / 1000} Мбит/с")
+        say(ctx, if (kbps == null) "${c.name}: без ограничения" else "${c.name}: ${kbps.label}")
     }
 
-    fun limitAll(ctx: Context, kbps: Int?) {
+    fun limitAll(ctx: Context, kbps: Limit?) {
         val k = needKeenetic(ctx)
         k.limitAll(router.value?.clients.orEmpty(), kbps)
         refreshLimits(k)
-        say(ctx, if (kbps == null) "Ограничения сняты" else "Всем до ${kbps / 1000} Мбит/с")
+        say(ctx, if (kbps == null) "Ограничения сняты" else "Всем: ${kbps.label}")
     }
 
     /** Re-reads the limits from the router, so the list shows what really got applied. */

@@ -916,7 +916,7 @@ private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
             Pill(
                 when {
                     "limitall" in busy -> "Применяю…"
-                    r.unknownLimit != null -> "Всем ≤ ${fmtLimit(r.unknownLimit)}"
+                    r.unknownLimit != null -> "Всем ${r.unknownLimit.label}"
                     else -> "Ограничить всех"
                 },
                 busy = "limitall" in busy,
@@ -974,7 +974,7 @@ private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
 }
 
 @Composable
-private fun LimitDialog(title: String, sub: String, current: Int?, onClose: () -> Unit, onPick: (Int?) -> Unit) {
+private fun LimitDialog(title: String, sub: String, current: Limit?, onClose: () -> Unit, onPick: (Limit?) -> Unit) {
     AlertDialog(
         onDismissRequest = onClose,
         containerColor = C.Raised,
@@ -983,10 +983,10 @@ private fun LimitDialog(title: String, sub: String, current: Int?, onClose: () -
             Column {
                 Text(sub, color = C.Text3, style = Num.copy(fontSize = 13.sp))
                 Spacer(Modifier.height(12.dp))
-                listOf(null, 1000, 3000, 5000, 10000, 20000).forEach { kbps ->
+                (listOf<Limit?>(null) + Limit.PRESETS).forEach { kbps ->
                     val sel = current == kbps
                     Text(
-                        if (kbps == null) "Без ограничения" else "${kbps / 1000} Мбит/с",
+                        if (kbps == null) "Без ограничения" else "↓ ${Limit.mbit(kbps.down)}   ↑ ${Limit.mbit(kbps.up)} Мбит/с",
                         color = if (sel) C.Blue else C.Text, fontFamily = Onest, fontSize = 16.sp,
                         fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
                         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
@@ -1013,7 +1013,7 @@ private fun ClientRow(cl: Client, onClick: () -> Unit) {
         }
         cl.limitKbps?.let {
             Text(
-                "≤ ${fmtLimit(it)}", color = C.Amber, style = Num.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium),
+                it.label, color = C.Amber, style = Num.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium),
                 modifier = Modifier.padding(end = 12.dp).clip(RoundedCornerShape(50)).background(C.Amber.copy(alpha = 0.12f))
                     .padding(horizontal = 8.dp, vertical = 2.dp),
             )
