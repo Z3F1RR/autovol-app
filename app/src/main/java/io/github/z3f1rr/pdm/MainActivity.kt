@@ -728,6 +728,7 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
         FlagRow("Другие Wi-Fi", "Проверять интернет в любой сети, не только в вагоне", "other_wifi", Monitor.otherWifi(ctx), running)
         FlagRow("Мобильный интернет", "Проверять, когда Wi-Fi нет", "mobile", Monitor.mobile(ctx), running)
         FlagRow("Имя Wi-Fi через root", "KernelSU спросит разрешение один раз", "root_ssid", Monitor.rootSsid(ctx), running)
+        FlagRow("Трафик каждого устройства", "Регистрировать новые устройства в роутере: иначе он не считает их трафик", "auto_reg", Ops.autoRegister(ctx), running)
         FlagRow("Автолечение модемов", "Нет сети 1,5 мин — переподключить, 5 мин — перезагрузить", "heal", Ops.heal(ctx), running)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) {

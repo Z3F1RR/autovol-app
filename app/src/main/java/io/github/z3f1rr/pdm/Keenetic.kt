@@ -61,12 +61,12 @@ class Keenetic(private val gw: String, private val network: Network?, private va
 
     private class Reply(val code: Int, val body: String, val headers: Map<String?, List<String>>)
 
-    private fun req(method: String, path: String, body: String? = null): Reply {
+    private fun req(method: String, path: String, body: String? = null, readMs: Int = 6000): Reply {
         val url = URL("http://$gw$path")
         val c = (network?.openConnection(url) ?: url.openConnection()) as HttpURLConnection
         try {
             c.connectTimeout = 3000
-            c.readTimeout = 6000
+            c.readTimeout = readMs
             c.useCaches = false
             c.instanceFollowRedirects = false
             c.requestMethod = method
@@ -110,17 +110,17 @@ class Keenetic(private val gw: String, private val network: Network?, private va
         if (a.code != 200) throw IllegalStateException("неверный логин или пароль роутера")
     }
 
-    private fun call(method: String, path: String, body: String? = null): String {
-        var r = req(method, path, body)
+    private fun call(method: String, path: String, body: String? = null, readMs: Int = 6000): String {
+        var r = req(method, path, body, readMs)
         if (r.code == 401) {
             auth()
-            r = req(method, path, body)
+            r = req(method, path, body, readMs)
         }
         if (r.code != 200) throw IllegalStateException("роутер ответил HTTP ${r.code} на $path")
         return r.body
     }
 
-    fun get(path: String): String = call("GET", path)
+    fun get(path: String, readMs: Int = 6000): String = call("GET", path, readMs = readMs)
 
     /** Runs CLI commands through RCI "parse"; throws with the router's message if one fails. */
     fun cli(vararg commands: String): String {
@@ -150,7 +150,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
      * Channels, devices and limits. Rates are computed against [prev]; [modems] are matched to router
      * interfaces by subnet (the modem hands out 192.168.8.x, the router's interface gets one of them).
      */
-    fun poll(prev: RouterState?, modems: List<ModemConfig>): RouterState {
+    fun poll(prev: RouterState?, modems: List<ModemConfig>, autoRegister: Boolean = false): RouterState {
         val now = System.currentTimeMillis()
         val dt = prev?.let { (now - it.time) / 1000.0 }?.takeIf { it in 1.0..600.0 }
         fun rate(cur: Long, old: Long?) = if (dt != null && old != null && cur >= old) (cur - old) * 8 / 1e6 / dt else null
@@ -187,35 +187,79 @@ class Keenetic(private val gw: String, private val network: Network?, private va
         else try { limits().also { limitsCache = Triple(it.first, it.second, now) } } catch (e: Exception) { emptyMap<String, Int>() to null }
 
         val hs = JSONObject(get("/rci/show/ip/hotspot")).optJSONArray("host") ?: JSONArray()
-        val clients = ArrayList<Client>()
+        // per-device byte counters: "show ip hotspot" has zeros on this firmware, the traffic monitor
+        // summary has them (registered devices only, unregistered are one shared line)
+        val sumRx = summary("rxbytes")
+        val sumTx = summary("txbytes")
+        class Raw(val h: JSONObject, val mac: String, val rx: Long, val tx: Long)
+        val raws = ArrayList<Raw>()
         for (i in 0 until hs.length()) {
             val h = hs.optJSONObject(i) ?: continue
             val mac = h.optString("mac").lowercase()
             if (mac.isEmpty()) continue
+            var rx = long(h, "rxbytes", "rx-bytes")
+            var tx = long(h, "txbytes", "tx-bytes")
+            if (rx + tx == 0L) { rx = sumRx[mac] ?: 0; tx = sumTx[mac] ?: 0 }
+            raws += Raw(h, mac, rx, tx)
+        }
+        // which counter is the download: devices download far more than they upload
+        val totRx = raws.sumOf { it.rx }
+        val totTx = raws.sumOf { it.tx }
+        if (rxIsDown == null && totRx + totTx > 20_000_000) rxIsDown = totRx > totTx
+        val rxDown = rxIsDown ?: (totRx > totTx)
+
+        val clients = ArrayList<Client>()
+        val toRegister = ArrayList<Raw>()
+        for (x in raws) {
+            val h = x.h
             val active = truthy(h, "active")
             val registered = truthy(h, "registered")
-            // the router's tx to the device is the device's download
-            val down = long(h, "txbytes", "tx-bytes", "tx_bytes")
-            val up = long(h, "rxbytes", "rx-bytes", "rx_bytes")
-            // some firmware reports the rate itself (bit/s)
-            val dSpeed = long(h, "txspeed", "tx-speed").takeIf { it > 0 }?.let { it / 1e6 }
-            val uSpeed = long(h, "rxspeed", "rx-speed").takeIf { it > 0 }?.let { it / 1e6 }
+            val down = if (rxDown) x.rx else x.tx
+            val up = if (rxDown) x.tx else x.rx
             if (!active && down + up == 0L) continue
-            val old = prev?.clients?.firstOrNull { it.mac == mac }
+            if (active && !registered) toRegister += x
+            val shape = h.optJSONObject("traffic-shape")
+            val own = shape?.let { maxOf(it.optInt("rx", 0), it.optInt("tx", 0)) }?.takeIf { it > 0 }
+            val old = prev?.clients?.firstOrNull { it.mac == x.mac }
             clients += Client(
-                mac = mac,
-                name = h.optString("name").ifBlank { h.optString("hostname") }.ifBlank { mac.uppercase() },
+                mac = x.mac,
+                name = h.optString("name").ifBlank { h.optString("hostname") }.ifBlank { x.mac.uppercase() },
                 ip = h.optString("ip"),
                 active = active,
                 down = down, up = up,
-                downMbps = if (active) dSpeed ?: rate(down, old?.down) else null,
-                upMbps = if (active) uSpeed ?: rate(up, old?.up) else null,
-                limitKbps = limits[mac] ?: if (!registered) unknownLimit else null,
+                downMbps = if (active) rate(down, old?.down) else null,
+                upMbps = if (active) rate(up, old?.up) else null,
+                limitKbps = own ?: limits[x.mac] ?: if (!registered) unknownLimit else null,
                 registered = registered,
             )
         }
+        if (autoRegister && toRegister.isNotEmpty()) {
+            // a few per poll; the limit for unregistered devices moves with them
+            val cmds = ArrayList<String>()
+            toRegister.take(5).forEach { x ->
+                val c = clients.first { it.mac == x.mac }
+                cmds += "known host ${hostName(c)} ${x.mac}"
+                if (unknownLimit != null) cmds += "ip traffic-shape host ${x.mac} rate $unknownLimit"
+            }
+            try { run(cmds, ignoreErrorsOf = cmds.toSet()) } catch (_: Exception) {}
+            limitsCache = null
+        }
         clients.sortWith(compareByDescending<Client> { it.active }.thenByDescending { it.downMbps ?: 0.0 }.thenByDescending { it.down })
         return RouterState(channels.sortedBy { if (it.modem < 0) 99 else it.modem }, clients, now, unknownLimit = unknownLimit)
+    }
+
+    /** Traffic monitor summary: MAC to byte counter for registered devices. */
+    private fun summary(attr: String): Map<String, Long> = try {
+        val arr = JSONObject(get("/rci/show/ip/hotspot/summary?attribute=$attr&detail=0&count=500")).optJSONArray("host") ?: JSONArray()
+        val m = HashMap<String, Long>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val mac = o.optString("mac").lowercase()
+            if (mac.isNotEmpty()) m[mac] = long(o, attr)
+        }
+        m
+    } catch (e: Exception) {
+        emptyMap()
     }
 
     /** For diagnostics: one active device as the router returns it, and what the summary command gives. */
@@ -295,36 +339,50 @@ class Keenetic(private val gw: String, private val network: Network?, private va
     }
 
     private fun hostName(c: Client): String {
-        val n = c.name.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(24)
-        return n.ifEmpty { "pdm-" + c.mac.replace(":", "").takeLast(6) }
+        // names must be unique: two "iPhone"s get different tails
+        val n = c.name.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(20)
+        val tail = c.mac.replace(":", "").takeLast(4)
+        return if (n.isEmpty()) "pdm-$tail" else "$n-$tail"
     }
 
     fun reboot() {
         try { cli("system reboot") } catch (e: java.io.IOException) { /* connection drops while rebooting */ }
     }
 
-    /** Recent events about channels and the internet, newest first. */
+    /**
+     * Recent events about channels and the internet, newest first. Entries look like
+     * {"timestamp": "...", "ident": "...", "message": {"message": "...", "level": ...}} on newer
+     * firmware and with a plain string "message" on older; both are handled.
+     */
     fun log(): List<LogLine> {
-        val text = get("/rci/show/log?max-lines=400")
+        val text = try { get("/rci/show/log?max-lines=300", readMs = 15000) } catch (e: Exception) {
+            cli("show log max-lines 300")
+        }
         val out = ArrayList<LogLine>()
+        fun msgOf(v: JSONObject): String? = when (val m = v.opt("message")) {
+            is String -> m
+            is JSONObject -> m.optString("message").takeIf { it.isNotEmpty() }
+            else -> null
+        }
         fun walk(v: Any?) {
             when (v) {
                 is JSONObject -> {
-                    val msg = v.optString("message")
-                    if (msg.isNotEmpty()) {
+                    val msg = msgOf(v)
+                    if (msg != null && v.has("timestamp")) {
                         if (INTERESTING.containsMatchIn(msg)) out += LogLine(v.optString("timestamp"), msg)
                     } else v.keys().forEach { walk(v.opt(it)) }
                 }
                 is JSONArray -> for (i in 0 until v.length()) walk(v.opt(i))
             }
         }
-        walk(JSONObject(text))
+        walk(if (text.trimStart().startsWith("[")) JSONArray(text) else JSONObject(text))
         return out.asReversed().take(60)
     }
 
     companion object {
         @Volatile private var cookie = ""
         @Volatile private var limitsCache: Triple<Map<String, Int>, Int?, Long>? = null
+        @Volatile private var rxIsDown: Boolean? = null
 
         private fun long(o: JSONObject, vararg keys: String): Long {
             for (k in keys) {
@@ -335,7 +393,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
             return 0
         }
         private val INTERESTING = Regex(
-            "(?i)(Usb|connected|disconnected|link (is )?(up|down)|internet|default gateway|ping.?check|reboot|failover|global)",
+            "(?i)(Usb|Lte|connected|disconnected|link|internet|gateway|ping|reboot|failover|global|modem|interface|up\\b|down\\b)",
         )
 
         fun subnet(ip: String) = ip.substringBeforeLast('.', "")

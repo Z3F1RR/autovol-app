@@ -242,10 +242,15 @@ object Monitor {
      * What to send requests through for the link [raw]: the link itself, or — when Android blocks it for us
      * (lockdown VPN) — the VPN on top of it. The VPN app sends local addresses (modems, router) straight to the LAN.
      */
-    fun via(ctx: Context, raw: Network): Network = if (isBlocked(ctx, raw)) vpnNetwork(ctx) ?: raw else raw
+    fun via(ctx: Context, raw: Network): Network {
+        if (!isBlocked(ctx, raw)) return raw
+        // the app may be excluded from the VPN: then the VPN network is closed for it too
+        val v = vpnNetwork(ctx) ?: return raw
+        return if (bindFails(v)) raw else v
+    }
 
     /** True when requests for [raw] go through the VPN because the bare link is blocked for us. */
-    fun viaVpn(ctx: Context, raw: Network): Boolean = isBlocked(ctx, raw) && vpnNetwork(ctx) != null
+    fun viaVpn(ctx: Context, raw: Network): Boolean = via(ctx, raw) != raw
 
     /** Default gateway of a network (the router), e.g. 192.168.1.1. */
     fun gateway(ctx: Context, network: Network): String? {
@@ -488,46 +493,76 @@ object Monitor {
         return out.toString()
     }
 
-    /** Download for up to 8 s, then upload for up to 6 s, through the own server. */
+    /**
+     * Download: 4 parallel streams for 8 s from the Yandex mirror (Yandex stays reachable under the
+     * whitelists, and one TCP stream underrates LTE), the own server if the mirror fails.
+     * Upload: 2 parallel streams for 6 s to the own server (there is no whitelisted place to upload to).
+     */
     fun speedTest(network: Network?, base: String): Speed {
         val now = System.currentTimeMillis()
         if (network == null) return Speed(null, null, now, "Нет сети для замера")
-        if (base.isEmpty()) return Speed(null, null, now, "Укажите сервер проверки в настройках")
-        val down = try { download(network, base) } catch (e: Exception) { null }
-        val up = try { upload(network, base) } catch (e: Exception) { null }
-        val err = if (down == null && up == null) "Сервер недоступен" else null
+        var down = mirror(network)?.let { url -> parallel(4, 8) { k, until -> downStream(network, url, k * 300_000_000L, until) } }
+        if (down == null && base.isNotEmpty()) down = parallel(4, 8) { _, until -> downStream(network, "$base/down?mb=32", null, until) }
+        val up = if (base.isEmpty()) null else parallel(2, 6) { _, until -> upStream(network, base, until) }
+        val err = if (down == null && up == null) "Не удалось замерить: нет связи с Яндексом и сервером" else null
         return Speed(down, up, System.currentTimeMillis(), err)
     }
 
-    private fun download(network: Network, base: String): Double? {
-        val c = open(network, "$base/down?mb=24", read = 6000)
+    @Volatile private var mirrorUrl: String? = null
+
+    /** A big file on mirror.yandex.ru: the current Ubuntu desktop ISO, found from the directory listing. */
+    private fun mirror(network: Network): String? {
+        mirrorUrl?.let { return it }
+        for (dir in listOf("https://mirror.yandex.ru/ubuntu-releases/noble/", "https://mirror.yandex.ru/ubuntu-releases/jammy/")) {
+            val html = try {
+                val c = open(network, dir, read = 6000)
+                try { if (c.responseCode == 200) c.inputStream.use { it.readBytes().toString(Charsets.UTF_8) } else "" } finally { c.disconnect() }
+            } catch (e: Exception) { "" }
+            val name = Regex("""href="(ubuntu-[0-9.]+-desktop-amd64\.iso)"""").findAll(html).lastOrNull()?.groupValues?.get(1) ?: continue
+            return (dir + name).also { mirrorUrl = it }
+        }
+        return null
+    }
+
+    /** Runs [n] streams until [sec] seconds pass; each returns bytes moved. Result in Mbit/s. */
+    private fun parallel(n: Int, sec: Int, stream: (Int, Long) -> Long): Double? {
+        val total = java.util.concurrent.atomic.AtomicLong()
+        val start = System.nanoTime()
+        val until = start + sec * 1_000_000_000L
+        val threads = (0 until n).map { k ->
+            Thread { try { total.addAndGet(stream(k, until)) } catch (_: Exception) {} }.apply { isDaemon = true; start() }
+        }
+        threads.forEach { it.join(sec * 1000L + 8000) }
+        val elapsed = (minOf(System.nanoTime(), until + 2_000_000_000L) - start) / 1e9
+        val bytes = total.get()
+        return if (bytes > 256 * 1024 && elapsed > 0) bytes * 8 / 1e6 / elapsed else null
+    }
+
+    private fun downStream(network: Network, url: String, offset: Long?, until: Long): Long {
+        val c = open(network, url, read = 6000)
         val buf = ByteArray(64 * 1024)
         var got = 0L
-        val start = System.nanoTime()
         try {
-            if (c.responseCode != 200) return null
+            if (offset != null) c.setRequestProperty("Range", "bytes=$offset-")
+            if (c.responseCode !in 200..299) return 0
             c.inputStream.use { s ->
-                while (true) {
+                while (System.nanoTime() < until) {
                     val n = s.read(buf)
                     if (n < 0) break
                     got += n
-                    if (System.nanoTime() - start > 8_000_000_000L) break
                 }
             }
         } finally {
             c.disconnect()
         }
-        val sec = (System.nanoTime() - start) / 1e9
-        return if (got > 64 * 1024 && sec > 0) got * 8 / 1e6 / sec else null
+        return got
     }
 
-    private fun upload(network: Network, base: String): Double? {
-        val total = 12 * 1024 * 1024
+    private fun upStream(network: Network, base: String, until: Long): Long {
+        val total = 32 * 1024 * 1024
         val c = open(network, "$base/up", read = 8000)
         val buf = ByteArray(64 * 1024).also { rnd.nextBytes(it) }
         var sent = 0L
-        val start = System.nanoTime()
-        var complete = false
         try {
             c.requestMethod = "POST"
             c.doOutput = true
@@ -537,19 +572,18 @@ object Monitor {
                 while (sent < total) {
                     o.write(buf)
                     sent += buf.size
-                    if (System.nanoTime() - start > 6_000_000_000L) break
+                    if (System.nanoTime() > until) throw StopUpload()
                 }
-                complete = sent >= total
-                if (!complete) throw StopUpload()
             }
             c.inputStream.use { it.readBytes() }
         } catch (e: StopUpload) {
-            // stopped on time: the bytes written so far are the measurement
+            // stopped on time: what was written is the measurement
+        } catch (e: Exception) {
+            if (sent < 256 * 1024) sent = 0
         } finally {
             c.disconnect()
         }
-        val sec = (System.nanoTime() - start) / 1e9
-        return if (sent > 64 * 1024 && sec > 0) sent * 8 / 1e6 / sec else null
+        return sent
     }
 
     private class StopUpload : Exception()

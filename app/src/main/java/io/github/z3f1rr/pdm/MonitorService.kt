@@ -439,7 +439,7 @@ class MonitorService : Service() {
         if (k != null) {
             val prev = Ops.router.value
             val next = try {
-                k.poll(prev, Monitor.config(this))
+                k.poll(prev, Monitor.config(this), Ops.autoRegister(this))
             } catch (e: Exception) {
                 (prev ?: RouterState()).copy(error = Monitor.short(e).substringAfter(": "))
             }

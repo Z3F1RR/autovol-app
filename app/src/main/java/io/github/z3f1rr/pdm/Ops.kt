@@ -44,6 +44,12 @@ object Ops {
 
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("pdm", Context.MODE_PRIVATE)
 
+    /** Toast, not the in-screen message: it shows above the bottom sheets too. */
+    fun say(ctx: Context, text: String) = Monitor.post { android.widget.Toast.makeText(ctx.applicationContext, text, android.widget.Toast.LENGTH_LONG).show() }
+
+    /** Register new devices in the router: it counts traffic only for registered ones. */
+    fun autoRegister(ctx: Context) = prefs(ctx).getBoolean("auto_reg", true)
+
     fun run(ctx: Context, key: String, block: (Context) -> Unit) {
         val app = ctx.applicationContext
         if (key in busy.value) return
@@ -52,7 +58,7 @@ object Ops {
             try {
                 block(app)
             } catch (e: Throwable) {
-                Monitor.post { Monitor.message.value = Monitor.short(e).substringAfter(": ").ifBlank { "Не получилось" } }
+                say(app, Monitor.short(e).substringAfter(": ").ifBlank { "Не получилось" })
             } finally {
                 Monitor.post { busy.value = busy.value - key }
             }
@@ -134,7 +140,7 @@ object Ops {
         modem(ctx, i).setLteBands(mask)
         Monitor.post {
             bands.value = bands.value + (i to mask)
-            Monitor.message.value = "Диапазон ${bandsLabel(mask)} — модем переподключится"
+            say(ctx, "Диапазон ${bandsLabel(mask)} — модем переподключится")
         }
     }
 
@@ -147,21 +153,21 @@ object Ops {
 
     fun makeMain(ctx: Context, iface: String) {
         needKeenetic(ctx).makeMain(iface, router.value?.channels.orEmpty())
-        Monitor.post { Monitor.message.value = "Основной канал переключён" }
+        say(ctx, "Основной канал переключён")
     }
 
     fun limit(ctx: Context, c: Client, kbps: Int?) {
         val k = needKeenetic(ctx)
         k.limit(c, kbps)
         refreshLimits(k)
-        Monitor.post { Monitor.message.value = if (kbps == null) "${c.name}: без ограничения" else "${c.name}: до ${kbps / 1000} Мбит/с" }
+        say(ctx, if (kbps == null) "${c.name}: без ограничения" else "${c.name}: до ${kbps / 1000} Мбит/с")
     }
 
     fun limitAll(ctx: Context, kbps: Int?) {
         val k = needKeenetic(ctx)
         k.limitAll(router.value?.clients.orEmpty(), kbps)
         refreshLimits(k)
-        Monitor.post { Monitor.message.value = if (kbps == null) "Ограничения сняты" else "Всем до ${kbps / 1000} Мбит/с" }
+        say(ctx, if (kbps == null) "Ограничения сняты" else "Всем до ${kbps / 1000} Мбит/с")
     }
 
     /** Re-reads the limits from the router, so the list shows what really got applied. */
@@ -183,7 +189,7 @@ object Ops {
 
     fun rebootRouter(ctx: Context) {
         needKeenetic(ctx).reboot()
-        Monitor.post { Monitor.message.value = "Роутер перезагружается, 2–3 минуты" }
+        say(ctx, "Роутер перезагружается, 2–3 минуты")
     }
 
     // ---------------------------------------------------------------- signal log along the route
@@ -221,6 +227,6 @@ object Ops {
         val uri = ctx.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v)
             ?: throw IllegalStateException("Не удалось создать файл")
         ctx.contentResolver.openOutputStream(uri)!!.use { o -> f.inputStream().use { it.copyTo(o) } }
-        Monitor.post { Monitor.message.value = "Сохранено в Загрузки: $name" }
+        say(ctx, "Сохранено в Загрузки: $name")
     }
 }
