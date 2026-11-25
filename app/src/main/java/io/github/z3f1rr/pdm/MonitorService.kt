@@ -20,9 +20,10 @@ import android.os.PowerManager
 import java.util.concurrent.Executors
 
 /**
- * Foreground service with independent loops: modems (local, cheap), internet (can take seconds when
- * packets vanish) and, while it runs, the UPS test. Off the train Wi-Fi the modem and internet loops
- * pause, release the wake locks and sleep until Android reports a Wi-Fi change.
+ * Foreground service with independent loops: signal (modems or the phone's own radio), internet (can
+ * take seconds when packets vanish) and, while it runs, the UPS test. It checks the train Wi-Fi, and
+ * if enabled other Wi-Fi networks and mobile data. With nothing to check it releases the wake locks
+ * and sleeps until Android reports a network change.
  */
 class MonitorService : Service() {
     private val modemLock = Object()
@@ -32,11 +33,18 @@ class MonitorService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private val history = List(2) { ArrayDeque<Point>() }
+    private val localHist = ArrayDeque<Point>()
+    private val ssids = HashMap<Network, String?>()
+
+    /** The link being checked. */
+    private data class Ctx(val where: Where, val network: Network, val label: String)
     private var callback: ConnectivityManager.NetworkCallback? = null
 
     @Volatile private var running = false
     @Volatile private var modems: List<ModemState> = emptyList()
-    @Volatile private var onTrain = false
+    @Volatile private var current: Ctx? = null
+    @Volatile private var local: Local? = null
+    @Volatile private var pausedLabel = ""
     @Volatile private var lastPlace = Place.NO_WIFI
     @Volatile private var upsThread: Thread? = null
 
@@ -107,7 +115,7 @@ class MonitorService : Service() {
         }
         running = true
         Monitor.post { Monitor.running.value = true }
-        registerWifiCallback()
+        registerNetworkCallback()
         Thread({ loop(modemLock) { pollModems() } }, "pdm-modems").apply { isDaemon = true; start() }
         Thread({ loop(netLock) { checkNet() } }, "pdm-net").apply { isDaemon = true; start() }
     }
@@ -130,26 +138,41 @@ class MonitorService : Service() {
         synchronized(upsLock) { upsLock.notifyAll() }
     }
 
-    private fun registerWifiCallback() {
+    /** Wi-Fi and mobile networks appearing or disappearing wake the loops at once. */
+    private fun registerNetworkCallback() {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) { Monitor.resetPlace(); wake() }
-            override fun onLost(network: Network) { Monitor.resetPlace(); wake() }
+            override fun onLost(network: Network) {
+                Monitor.resetPlace()
+                synchronized(ssids) { ssids.remove(network) }
+                wake()
+            }
             override fun onLinkPropertiesChanged(network: Network, lp: android.net.LinkProperties) { Monitor.resetPlace(); wake() }
         }
         try {
             cm.registerNetworkCallback(
-                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), cb,
+                NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                    .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+                    .build(),
+                cb,
             )
             callback = cb
         } catch (_: Exception) {
         }
     }
 
-    /** Wake locks only while there is something to watch: on the train Wi-Fi, or during the UPS test. */
+    /**
+     * CPU wake lock while something is being checked or the UPS test runs; the low-latency Wi-Fi lock
+     * only on the train Wi-Fi and during the UPS test.
+     */
     @Synchronized
     private fun updateLocks() {
-        val need = running && (onTrain || upsRunning())
+        val ups = upsRunning()
+        val need = running && (current != null || ups)
+        val needWifi = running && (current?.where == Where.TRAIN || ups)
         val wl = wakeLock ?: getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pdm:monitor").apply { setReferenceCounted(false) }
             .also { wakeLock = it }
@@ -158,45 +181,92 @@ class MonitorService : Service() {
             ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "pdm:wifi")?.apply { setReferenceCounted(false) }
             ?.also { wifiLock = it }
         try {
-            if (need) {
-                if (!wl.isHeld) wl.acquire()
-                if (wf != null && !wf.isHeld) wf.acquire()
-            } else {
-                if (wl.isHeld) wl.release()
-                if (wf != null && wf.isHeld) wf.release()
-            }
+            if (need) { if (!wl.isHeld) wl.acquire() } else if (wl.isHeld) wl.release()
+            if (wf != null) { if (needWifi) { if (!wf.isHeld) wf.acquire() } else if (wf.isHeld) wf.release() }
         } catch (_: Exception) {
         }
     }
 
-    /** Checks where we are; off the train it publishes the pause and returns false. */
-    private fun atTrain(): Network? {
-        val (place, network) = Monitor.place(this)
+    /**
+     * Picks the link to check: the train Wi-Fi first, then another Wi-Fi, then mobile data (each only
+     * if enabled). Returns null and publishes the pause when there is nothing to check. Switching to
+     * another link starts the state over, without an alert: "internet appeared" on a new network is noise.
+     */
+    @Synchronized
+    private fun resolve(): Ctx? {
+        val (place, wifi) = Monitor.place(this)
         lastPlace = place
-        val was = onTrain
-        onTrain = place == Place.TRAIN
-        if (was != onTrain) updateLocks()
-        if (onTrain) return network
-        val paused = if (place == Place.NO_WIFI) Net.NO_WIFI else Net.FOREIGN
-        if (confirmed != paused) {
-            confirmed = paused; pending = null; latency = null; since = System.currentTimeMillis()
+        val c = when {
+            place == Place.TRAIN && wifi != null -> Ctx(Where.TRAIN, wifi, "Wi-Fi вагона")
+            place == Place.FOREIGN && wifi != null && Monitor.otherWifi(this) ->
+                Ctx(Where.WIFI, wifi, ssid(wifi)?.let { "Wi-Fi «$it»" } ?: "Другой Wi-Fi")
+            place == Place.NO_WIFI && Monitor.mobile(this) -> Monitor.cellNetwork(this)?.let {
+                val op = Radio.cell(this).name
+                Ctx(Where.MOBILE, it, if (op.isNotEmpty()) "Мобильный · $op" else "Мобильный интернет")
+            }
+            else -> null
         }
-        modems = emptyList()
+        val prev = current
+        val now = System.currentTimeMillis()
+        if (prev?.where != c?.where || prev?.network != c?.network) {
+            confirmed = null; pending = null; latency = null; recheckSoon = false; since = now
+            modems = emptyList(); local = null
+            synchronized(history) { history.forEach { it.clear() }; localHist.clear() }
+            Monitor.post { Monitor.history.value = emptyList(); Monitor.localHistory.value = emptyList() }
+        }
+        current = c
+        if (prev?.where != c?.where) updateLocks()
+        if (c != null) return c
+        val paused = if (place == Place.FOREIGN) Net.FOREIGN else Net.NO_WIFI
+        pausedLabel = when {
+            paused == Net.FOREIGN -> "Другой Wi-Fi · проверка выключена в настройках"
+            Monitor.mobile(this) -> "Нет ни Wi-Fi, ни мобильного интернета"
+            else -> "Wi-Fi выключен или сети вагона нет рядом"
+        }
+        if (confirmed != paused) { confirmed = paused; since = now }
         publish()
         return null
     }
 
+    /** SSID through root, once per network. Without root (or if disabled) — null. */
+    private fun ssid(n: Network): String? {
+        if (!Monitor.rootSsid(this)) return null
+        synchronized(ssids) { if (ssids.containsKey(n)) return ssids[n] }
+        val v = Root.ssid()
+        synchronized(ssids) { ssids[n] = v }
+        return v
+    }
+
+    private fun interval(c: Ctx): Long {
+        val sec = Monitor.intervalSec(this)
+        // off the train: no point checking a phone's own link more often than every 30 s, it costs traffic
+        return (if (c.where == Where.TRAIN) sec else maxOf(sec, 30)) * 1000L
+    }
+
     private fun pollModems(): Long {
-        val wifi = atTrain() ?: return pausedWait()
+        val c = resolve() ?: return pausedWait()
+        val now = System.currentTimeMillis()
+        if (c.where != Where.TRAIN) {
+            val l = if (c.where == Where.WIFI) Radio.wifi(this, c.network, ssid(c.network)) else Radio.cell(this)
+            local = l
+            val hist = synchronized(history) {
+                // Wi-Fi: dBm goes in the RSRP slot, the chart scales it separately
+                localHist.addLast(Point(now, if (c.where == Where.WIFI) l.dbm else l.rsrp ?: l.dbm, l.sinr))
+                while (localHist.isNotEmpty() && now - localHist.first().t > 30 * 60_000) localHist.removeFirst()
+                localHist.toList()
+            }
+            Monitor.post { Monitor.localHistory.value = hist }
+            publish()
+            return interval(c)
+        }
         val states = Monitor.config(this).map { m ->
             try {
-                HiLink(m.ip, wifi).read()
+                HiLink(m.ip, c.network).read()
             } catch (e: Exception) {
                 ModemState(ok = false, error = e.javaClass.simpleName)
             }
         }
         modems = states
-        val now = System.currentTimeMillis()
         val hist = synchronized(history) {
             states.forEachIndexed { i, s ->
                 val h = history[i]
@@ -207,12 +277,14 @@ class MonitorService : Service() {
         }
         Monitor.post { Monitor.history.value = hist }
         publish()
-        return Monitor.intervalSec(this) * 1000L
+        return interval(c)
     }
 
     private fun checkNet(): Long {
-        val wifi = atTrain() ?: return pausedWait()
-        val (raw, ms) = Monitor.check(wifi, Monitor.server(this))
+        val c = resolve() ?: return pausedWait()
+        val (raw, ms) = Monitor.check(c.network, Monitor.server(this))
+        // the link changed while we were checking: drop this result
+        if (current?.network != c.network) return 1000L
         val now = System.currentTimeMillis()
         val prev = confirmed
         val paused = prev == null || prev == Net.NO_WIFI || prev == Net.FOREIGN
@@ -231,18 +303,23 @@ class MonitorService : Service() {
         publish()
         val cur = confirmed
         if (changed && cur != null) {
-            getSystemService(NotificationManager::class.java).notify(ID_ALERT, buildAlert(cur))
+            getSystemService(NotificationManager::class.java).notify(ID_ALERT, buildAlert(cur, c.label))
         }
-        return if (recheckSoon) 3000L else Monitor.intervalSec(this) * 1000L
+        return if (recheckSoon) 3000L else interval(c)
     }
 
-    /** No Wi-Fi: sleep until Android reports one. Other Wi-Fi: look again in a minute. */
-    private fun pausedWait(): Long = if (lastPlace == Place.NO_WIFI) 10 * 60_000L else 60_000L
+    /** Nothing to check: sleep until Android reports a network change, look again now and then anyway. */
+    private fun pausedWait(): Long = if (lastPlace == Place.FOREIGN) 60_000L else 10 * 60_000L
 
     @Synchronized
     private fun publish() {
         val net = confirmed ?: return
-        val snap = Snapshot(modems, net, latency, System.currentTimeMillis(), since)
+        val c = current
+        val snap = Snapshot(
+            modems = if (c?.where == Where.TRAIN) modems else emptyList(),
+            net = net, latencyMs = latency, time = System.currentTimeMillis(), since = since,
+            where = c?.where, label = c?.label ?: pausedLabel, local = if (c != null && c.where != Where.TRAIN) local else null,
+        )
         Monitor.post { Monitor.snapshot.value = snap }
         try {
             getSystemService(NotificationManager::class.java).notify(ID_STATUS, buildStatus(snap))
@@ -293,7 +370,7 @@ class MonitorService : Service() {
 
     private fun speedTest() {
         Monitor.post { Monitor.speedRunning.value = true }
-        val s = Monitor.speedTest(Monitor.wifiNetwork(this), Monitor.server(this))
+        val s = Monitor.speedTest(current?.network, Monitor.server(this))
         if (s.error == null) Monitor.saveSpeed(this, s)
         Monitor.post {
             Monitor.speedRunning.value = false
@@ -346,12 +423,13 @@ class MonitorService : Service() {
 
     private fun buildStatus(s: Snapshot?): Notification {
         val cfg = Monitor.config(this)
-        val paused = s?.net == Net.NO_WIFI || s?.net == Net.FOREIGN
+        val paused = s != null && s.where == null
         val body = when {
             s == null -> "Проверяю…"
-            s.net == Net.NO_WIFI -> "Wi-Fi выключен или нет сети рядом"
-            s.net == Net.FOREIGN -> "Телефон подключён к другой сети"
-            else -> s.modems.mapIndexed { i, m -> line(cfg.getOrNull(i)?.name ?: "?", m) }.joinToString("\n")
+            s.where == null -> s.label
+            s.where == Where.TRAIN ->
+                (listOf(s.label) + s.modems.mapIndexed { i, m -> line(cfg.getOrNull(i)?.name ?: "?", m) }).joinToString("\n")
+            else -> listOfNotNull(s.label, s.local?.let { localLine(it) }).joinToString("\n")
         }
         val b = Notification.Builder(this, CH_STATUS)
             .setSmallIcon(R.drawable.ic_stat)
@@ -366,7 +444,7 @@ class MonitorService : Service() {
         return b.build()
     }
 
-    private fun buildAlert(net: Net): Notification =
+    private fun buildAlert(net: Net, label: String): Notification =
         Notification.Builder(this, CH_ALERT)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(
@@ -376,6 +454,7 @@ class MonitorService : Service() {
                     else -> "Интернет пропал"
                 },
             )
+            .setContentText(label)
             .setAutoCancel(true)
             .setTimeoutAfter(5 * 60_000)
             .setContentIntent(openApp())
@@ -435,6 +514,16 @@ class MonitorService : Service() {
             if (!m.connected) return "$name — нет сети"
             val band = if (m.band.isNotEmpty()) " B${m.band}" else ""
             return "$name ${m.net}$band · ${m.rsrp ?: "—"} / ${m.sinr ?: "—"} дБ"
+        }
+
+        fun localLine(l: Local): String = when (l.where) {
+            Where.WIFI -> listOfNotNull(
+                l.dbm?.let { "$it дБм" }, l.gen.takeIf { it.isNotEmpty() }, l.linkMbps?.let { "линк $it Мбит/с" },
+            ).joinToString(" · ")
+            else -> listOfNotNull(
+                l.gen.takeIf { it.isNotEmpty() },
+                if (l.rsrp != null) "${l.rsrp} / ${l.sinr ?: "—"} дБ" else l.dbm?.let { "$it дБм" },
+            ).joinToString(" · ")
         }
 
         fun createChannels(ctx: Context) {

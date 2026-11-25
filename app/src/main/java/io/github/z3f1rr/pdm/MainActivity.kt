@@ -211,8 +211,11 @@ private fun Screen() {
                 )
             }
 
-            val paused = snap?.net == Net.NO_WIFI || snap?.net == Net.FOREIGN
-            if (running && !paused) {
+            val where = snap?.where
+            if (running && where != null && where != Where.TRAIN) {
+                LocalCard(snap?.local, where, Monitor.localHistory.value)
+            }
+            if (running && where == Where.TRAIN) {
                 cfg.forEachIndexed { i, c ->
                     ModemCard(
                         c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(),
@@ -257,14 +260,14 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
     val ctx = LocalContext.current
     val mins = s?.let { (now - it.since) / 60_000 } ?: 0
     val dur = if (mins > 0) fmtMin(mins) else ""
+    fun join(vararg p: String?) = p.filterNotNull().filter { it.isNotEmpty() }.joinToString(" · ")
     val (tone, title, sub) = when {
         !running -> Triple(C.Text3, "Мониторинг выключен", "Включите в настройках")
         s == null -> Triple(C.Text3, "Проверяю…", "")
-        s.net == Net.NO_WIFI -> Triple(C.Text3, "На паузе", "Wi-Fi выключен или сети вагона нет рядом")
-        s.net == Net.FOREIGN -> Triple(C.Text3, "На паузе", "Телефон подключён к другой сети")
-        s.net == Net.FULL -> Triple(C.Green, "Интернет есть", s.latencyMs?.let { "Отклик $it мс" } ?: "")
-        s.net == Net.WHITELIST -> Triple(C.Amber, "Белые списки", listOf("Только разрешённые сайты", dur).filter { it.isNotEmpty() }.joinToString(" · "))
-        else -> Triple(C.Red, "Нет интернета", if (dur.isNotEmpty()) "Уже $dur" else "")
+        s.where == null -> Triple(C.Text3, "На паузе", s.label)
+        s.net == Net.FULL -> Triple(C.Green, "Интернет есть", join(s.label, s.latencyMs?.let { "$it мс" }))
+        s.net == Net.WHITELIST -> Triple(C.Amber, "Белые списки", join(s.label, dur))
+        else -> Triple(C.Red, "Нет интернета", join(s.label, if (dur.isNotEmpty()) "уже $dur" else null))
     }
     val age = s?.let { ((now - it.time) / 1000).coerceAtLeast(0) }
     val server = remember(s?.time) { Monitor.server(ctx) }
@@ -279,7 +282,7 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
             .padding(22.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PulseDot(tone, live = running && s != null && s.net != Net.NO_WIFI && s.net != Net.FOREIGN)
+            PulseDot(tone, live = running && s?.where != null)
             Spacer(Modifier.weight(1f))
             if (running && age != null) {
                 Text(
@@ -296,7 +299,7 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
             Text(sub, color = C.Text2, style = Num.copy(fontSize = 15.sp))
         }
 
-        if (running && server.isNotEmpty() && s?.net != Net.NO_WIFI && s?.net != Net.FOREIGN) {
+        if (running && server.isNotEmpty() && s?.where != null) {
             Spacer(Modifier.height(18.dp))
             Box(Modifier.fillMaxWidth().height(1.dp).background(C.Line))
             Spacer(Modifier.height(16.dp))
@@ -314,7 +317,8 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
                     )
                 }
                 Pill(
-                    text = if (measuring) "Замер…" else "Замерить",
+                    // on mobile data the test costs about 40 MB of traffic
+                    text = if (measuring) "Замер…" else if (s.where == Where.MOBILE) "Замерить · 40 МБ" else "Замерить",
                     busy = measuring,
                     onClick = { if (!measuring) MonitorService.start(ctx, MonitorService.ACTION_SPEED) },
                 )
@@ -437,7 +441,7 @@ private fun Bars(q: Int, on: Color) {
 }
 
 @Composable
-private fun Spark(h: List<Point>) {
+private fun Spark(h: List<Point>, lo: Float = -125f, hi: Float = -65f) {
     Canvas(Modifier.fillMaxWidth().height(44.dp)) {
         val t0 = h.first().t
         val span = (h.last().t - t0).coerceAtLeast(1)
@@ -452,8 +456,56 @@ private fun Spark(h: List<Point>) {
             }
             drawPath(p, color, style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round))
         }
-        line({ it.rsrp }, -125f, -65f, C.Blue)
+        line({ it.rsrp }, lo, hi, C.Blue)
         line({ it.sinr }, -10f, 30f, C.Amber.copy(alpha = 0.85f))
+    }
+}
+
+// ---------------------------------------------------------------- phone's own link
+
+@Composable
+private fun LocalCard(l: Local?, where: Where, hist: List<Point>) {
+    val q = l?.quality ?: 0
+    val tone = when {
+        q >= 3 -> C.Green
+        q == 2 -> C.Amber
+        else -> C.Red
+    }
+    val wifi = where == Where.WIFI
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.Surface).padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 18.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    l?.name?.takeIf { it.isNotEmpty() } ?: if (wifi) "Wi-Fi" else "Мобильный интернет",
+                    color = C.Text, fontFamily = Onest, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    listOfNotNull(if (wifi) "Wi-Fi телефона" else "SIM телефона", l?.gen?.takeIf { it.isNotEmpty() }).joinToString(" · "),
+                    color = C.Text2, style = Num.copy(fontSize = 14.sp),
+                )
+            }
+            Bars(q, tone)
+        }
+        if (l != null) {
+            Spacer(Modifier.height(14.dp))
+            Row {
+                if (wifi) {
+                    Metric(l.dbm?.toString() ?: "—", "Сигнал, дБм", C.Blue, Modifier.weight(1f))
+                    Metric(l.linkMbps?.toString() ?: "—", "Линк, Мбит/с", null, Modifier.weight(1f))
+                } else if (l.rsrp != null) {
+                    Metric(l.rsrp.toString(), "RSRP", C.Blue, Modifier.weight(1f))
+                    Metric(l.sinr?.toString() ?: "—", "SINR", C.Amber, Modifier.weight(1f))
+                } else {
+                    Metric(l.dbm?.toString() ?: "—", "Сигнал, дБм", C.Blue, Modifier.weight(1f))
+                }
+            }
+            if (hist.size > 2) {
+                Spacer(Modifier.height(14.dp))
+                if (wifi) Spark(hist, -90f, -30f)
+                else if (l.rsrp != null) Spark(hist)
+                else Spark(hist, -115f, -55f)
+            }
+        }
     }
 }
 
@@ -555,7 +607,7 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
     var server by remember { mutableStateOf(Monitor.server(ctx)) }
     var interval by remember { mutableStateOf(Monitor.intervalSec(ctx).toString()) }
     Column(
-        Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 20.dp),
+        Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -569,6 +621,9 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
                 colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Bg),
             )
         }
+        FlagRow("Другие Wi-Fi", "Проверять интернет в любой сети, не только в вагоне", "other_wifi", Monitor.otherWifi(ctx), running)
+        FlagRow("Мобильный интернет", "Проверять, когда Wi-Fi нет. Около 15 МБ в сутки", "mobile", Monitor.mobile(ctx), running)
+        FlagRow("Имя Wi-Fi через root", "KernelSU спросит разрешение один раз", "root_ssid", Monitor.rootSsid(ctx), running)
         OutlinedTextField(
             server, { server = it.trim() }, label = { Text("Сервер проверки") },
             placeholder = { Text("http://IP:порт/ключ") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
@@ -597,5 +652,27 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
             shape = RoundedCornerShape(16.dp),
             colors = ButtonDefaults.buttonColors(containerColor = C.Text, contentColor = C.Bg),
         ) { Text("Сохранить", fontFamily = Onest, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
+    }
+}
+
+@Composable
+private fun FlagRow(title: String, hint: String, key: String, initial: Boolean, running: Boolean) {
+    val ctx = LocalContext.current
+    var on by remember { mutableStateOf(initial) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = C.Text, fontFamily = Onest, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(hint, color = C.Text3, fontFamily = Onest, fontSize = 13.sp)
+        }
+        Switch(
+            checked = on,
+            onCheckedChange = { v ->
+                on = v
+                Monitor.setFlag(ctx, key, v)
+                Monitor.resetPlace()
+                if (running) MonitorService.start(ctx)
+            },
+            colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Bg),
+        )
     }
 }

@@ -20,6 +20,9 @@ enum class Net { FULL, WHITELIST, NONE, NO_WIFI, FOREIGN }
 /** Where the phone is: on the train router's Wi-Fi, without Wi-Fi, or on some other Wi-Fi. */
 enum class Place { TRAIN, NO_WIFI, FOREIGN }
 
+/** Which link is being checked right now. */
+enum class Where { TRAIN, WIFI, MOBILE }
+
 /** UPS runtime test, persisted so it survives the app being killed. */
 data class Ups(
     val start: Long,
@@ -37,6 +40,12 @@ data class Snapshot(
     val time: Long,
     /** When the current [net] state began. */
     val since: Long,
+    /** Link being checked; null while checks are paused. */
+    val where: Where? = null,
+    /** "Wi-Fi вагона", "Wi-Fi «Home»", "Мобильный · Yota", or why checks are paused. */
+    val label: String = "",
+    /** The phone's own signal on another Wi-Fi or mobile data. */
+    val local: Local? = null,
 )
 
 /** One point of history: time, RSRP, SINR. */
@@ -53,6 +62,7 @@ object Monitor {
     val speed = mutableStateOf<Speed?>(null)
     val speedRunning = mutableStateOf(false)
     val ups = mutableStateOf<Ups?>(null)
+    val localHistory = mutableStateOf<List<Point>>(emptyList())
 
     private val main = Handler(Looper.getMainLooper())
     private val rnd = SecureRandom()
@@ -82,6 +92,17 @@ object Monitor {
         }
         e.putInt("interval", interval).putString("server", normalize(server)).apply()
     }
+
+    /** Check other Wi-Fi networks too (not only the train router). */
+    fun otherWifi(ctx: Context) = prefs(ctx).getBoolean("other_wifi", true)
+
+    /** Check mobile data when there is no Wi-Fi. */
+    fun mobile(ctx: Context) = prefs(ctx).getBoolean("mobile", true)
+
+    /** Read the Wi-Fi name through su (KernelSU / Magisk). */
+    fun rootSsid(ctx: Context) = prefs(ctx).getBoolean("root_ssid", false)
+
+    fun setFlag(ctx: Context, key: String, on: Boolean) = prefs(ctx).edit().putBoolean(key, on).apply()
 
     fun normalize(url: String): String {
         var u = url.trim().trimEnd('/')
@@ -115,7 +136,21 @@ object Monitor {
     fun wifiNetwork(ctx: Context): Network? {
         val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return null
         return cm.allNetworks.firstOrNull { n ->
-            cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+            val c = cm.getNetworkCapabilities(n)
+            // a VPN over Wi-Fi also reports TRANSPORT_WIFI: skip it, we need the real link
+            c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+        }
+    }
+
+    /** Mobile data network, if Android keeps one up. Requests bound to it bypass Wi-Fi and the phone's VPN. */
+    @Suppress("DEPRECATION")
+    fun cellNetwork(ctx: Context): Network? {
+        val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return null
+        return cm.allNetworks.firstOrNull { n ->
+            val c = cm.getNetworkCapabilities(n)
+            c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) &&
+                !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN) &&
+                c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
         }
     }
 
@@ -170,13 +205,13 @@ object Monitor {
     /**
      * Is the phone on the train router? Recognised without root or location permission: the gateway
      * answers like a Keenetic web interface (401 with an X-NDM-Realm header), or one of the modems
-     * answers. The answer is cached per network for two minutes.
+     * answers. A "yes" is cached per network for two minutes, a "no" for one minute; a Wi-Fi change clears it.
      */
     @Synchronized
     fun place(ctx: Context): Pair<Place, Network?> {
         val n = wifiNetwork(ctx) ?: return Place.NO_WIFI to null
         val now = System.currentTimeMillis()
-        if (n == placeNet && now - placeAt < 120_000) return (if (placeOk) Place.TRAIN else Place.FOREIGN) to n
+        if (n == placeNet && now - placeAt < (if (placeOk) 120_000 else 60_000)) return (if (placeOk) Place.TRAIN else Place.FOREIGN) to n
         val keenetic = gateway(ctx, n)?.let { gw ->
             try {
                 val c = open(n, "http://$gw/auth", connect = 2500, read = 3000)
@@ -188,8 +223,10 @@ object Monitor {
         val ok = keenetic || config(ctx).any { m ->
             try { HiLink(m.ip, n).read().ok } catch (e: Exception) { false }
         }
-        // only a positive answer is cached: right after connecting the gateway may not be known yet
-        if (ok) { placeNet = n; placeOk = true; placeAt = now } else placeNet = null
+        // a "no" right after connecting may be wrong (gateway not known yet): onLinkPropertiesChanged resets the cache
+        placeNet = if (gateway(ctx, n) != null || ok) n else null
+        placeOk = ok
+        placeAt = now
         return (if (ok) Place.TRAIN else Place.FOREIGN) to n
     }
 
@@ -278,7 +315,7 @@ object Monitor {
     /** Download for up to 8 s, then upload for up to 6 s, through the own server. */
     fun speedTest(network: Network?, base: String): Speed {
         val now = System.currentTimeMillis()
-        if (network == null) return Speed(null, null, now, "Телефон не в Wi-Fi вагона")
+        if (network == null) return Speed(null, null, now, "Нет сети для замера")
         if (base.isEmpty()) return Speed(null, null, now, "Укажите сервер проверки в настройках")
         val down = try { download(network, base) } catch (e: Exception) { null }
         val up = try { upload(network, base) } catch (e: Exception) { null }
