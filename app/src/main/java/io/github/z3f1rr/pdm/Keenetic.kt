@@ -35,6 +35,8 @@ data class Client(
     val upMbps: Double?,
     /** Speed limit in kbit/s, null = not limited. */
     val limitKbps: Int?,
+    /** Registered in the router ("known host"): only those can get a personal limit. */
+    val registered: Boolean = false,
 )
 
 data class RouterState(
@@ -42,6 +44,8 @@ data class RouterState(
     val clients: List<Client> = emptyList(),
     val time: Long = System.currentTimeMillis(),
     val error: String? = null,
+    /** Limit for all unregistered devices, kbit/s. */
+    val unknownLimit: Int? = null,
 ) {
     val downMbps: Double? get() = channels.mapNotNull { it.downMbps }.takeIf { it.isNotEmpty() }?.sum()
     val upMbps: Double? get() = channels.mapNotNull { it.upMbps }.takeIf { it.isNotEmpty() }?.sum()
@@ -177,18 +181,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
             )
         }
 
-        val limits = HashMap<String, Int>()
-        try {
-            val ts = JSONObject(get("/rci/ip/traffic-shape"))
-            val hosts = ts.opt("host")
-            val arr = when (hosts) { is JSONArray -> hosts; is JSONObject -> JSONArray().put(hosts); else -> JSONArray() }
-            for (i in 0 until arr.length()) {
-                val h = arr.optJSONObject(i) ?: continue
-                val rate = h.opt("rate")?.toString()?.toIntOrNull() ?: continue
-                limits[h.optString("mac").lowercase()] = rate
-            }
-        } catch (_: Exception) {
-        }
+        val (limits, unknownLimit) = try { limits() } catch (e: Exception) { emptyMap<String, Int>() to null }
 
         val hs = JSONObject(get("/rci/show/ip/hotspot")).optJSONArray("host") ?: JSONArray()
         val clients = ArrayList<Client>()
@@ -197,6 +190,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
             val mac = h.optString("mac").lowercase()
             if (mac.isEmpty()) continue
             val active = truthy(h, "active")
+            val registered = truthy(h, "registered")
             // the router's tx to the device is the device's download
             val down = h.optLong("txbytes", 0)
             val up = h.optLong("rxbytes", 0)
@@ -210,11 +204,12 @@ class Keenetic(private val gw: String, private val network: Network?, private va
                 down = down, up = up,
                 downMbps = if (active) rate(down, old?.down) else null,
                 upMbps = if (active) rate(up, old?.up) else null,
-                limitKbps = limits[mac],
+                limitKbps = limits[mac] ?: if (!registered) unknownLimit else null,
+                registered = registered,
             )
         }
         clients.sortWith(compareByDescending<Client> { it.active }.thenByDescending { it.downMbps ?: 0.0 }.thenByDescending { it.down })
-        return RouterState(channels.sortedBy { if (it.modem < 0) 99 else it.modem }, clients, now)
+        return RouterState(channels.sortedBy { if (it.modem < 0) 99 else it.modem }, clients, now, unknownLimit = unknownLimit)
     }
 
     /** Makes [iface] the main channel: priority above every other internet interface. */
@@ -224,9 +219,60 @@ class Keenetic(private val gw: String, private val network: Network?, private va
         cli("interface $iface ip global ${top + 1}", "system configuration save")
     }
 
-    fun limit(mac: String, kbps: Int?) {
-        if (kbps == null) cli("no ip traffic-shape host $mac", "system configuration save")
-        else cli("ip traffic-shape host $mac rate $kbps", "system configuration save")
+    /**
+     * Current limits from the running config: per registered device, and the one for all unregistered
+     * devices. Lines look like "ip traffic-shape host aa:bb:… rate 5000 [asymmetric 5000]".
+     */
+    fun limits(): Pair<Map<String, Int>, Int?> {
+        val cfg = get("/rci/show/running-config")
+        val hosts = Regex("""ip traffic-shape host ([0-9a-fA-F:]{17}) rate (\d+)""").findAll(cfg)
+            .associate { it.groupValues[1].lowercase() to it.groupValues[2].toInt() }
+        val unknown = Regex("""ip traffic-shape unknown-host rate (\d+)""").find(cfg)?.groupValues?.get(1)?.toInt()
+        return hosts to unknown
+    }
+
+    /**
+     * Limit for one device. The router limits only registered devices, so an unregistered one is
+     * registered first (it then also stops falling under the "all unregistered" limit).
+     */
+    fun limit(c: Client, kbps: Int?) {
+        val cmds = ArrayList<String>()
+        if (!c.registered) cmds += "known host ${hostName(c)} ${c.mac}"
+        cmds += if (kbps == null) "no ip traffic-shape host ${c.mac}" else "ip traffic-shape host ${c.mac} rate $kbps"
+        run(cmds, ignoreErrorsOf = setOf("no ip traffic-shape host ${c.mac}"))
+    }
+
+    /** One limit for everyone: every registered device plus the rule for unregistered ones. */
+    fun limitAll(clients: List<Client>, kbps: Int?) {
+        val cmds = ArrayList<String>()
+        if (kbps == null) {
+            cmds += "no ip traffic-shape unknown-host"
+            cmds += "no ip traffic-shape host"
+            run(cmds, ignoreErrorsOf = cmds.toSet())
+        } else {
+            cmds += "ip traffic-shape unknown-host rate $kbps"
+            clients.filter { it.registered }.forEach { cmds += "ip traffic-shape host ${it.mac} rate $kbps" }
+            run(cmds, ignoreErrorsOf = emptySet())
+        }
+    }
+
+    /** Commands one by one (one failure doesn't stop the rest), then the config is saved. */
+    private fun run(cmds: List<String>, ignoreErrorsOf: Set<String>) {
+        val errors = ArrayList<String>()
+        for (c in cmds) {
+            try {
+                cli(c)
+            } catch (e: IllegalStateException) {
+                if (c !in ignoreErrorsOf) errors += e.message ?: c
+            }
+        }
+        try { cli("system configuration save") } catch (_: Exception) {}
+        if (errors.isNotEmpty()) throw IllegalStateException(errors.first())
+    }
+
+    private fun hostName(c: Client): String {
+        val n = c.name.filter { it.isLetterOrDigit() || it == '-' || it == '_' }.take(24)
+        return n.ifEmpty { "pdm-" + c.mac.replace(":", "").takeLast(6) }
     }
 
     fun reboot() {

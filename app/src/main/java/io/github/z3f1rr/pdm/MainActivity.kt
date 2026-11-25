@@ -836,6 +836,8 @@ private fun fmtBytes(b: Long): String = when {
     else -> "${b / 1000} КБ"
 }
 
+private fun fmtLimit(kbps: Int) = if (kbps % 1000 == 0) "${kbps / 1000} Мбит/с" else "%.1f Мбит/с".format(Locale("ru"), kbps / 1000.0)
+
 private fun chName(ch: Channel, cfg: List<ModemConfig>) = cfg.getOrNull(ch.modem)?.name ?: ch.iface
 
 @Composable
@@ -876,6 +878,7 @@ private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
     val ctx = LocalContext.current
     val busy = Ops.busy.value
     var limitFor by remember { mutableStateOf<Client?>(null) }
+    var limitAll by remember { mutableStateOf(false) }
     var confirmReboot by remember { mutableStateOf(false) }
     var showOffline by remember { mutableStateOf(false) }
     val log = Ops.log.value
@@ -907,7 +910,17 @@ private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
 
         val online = r.clients.filter { it.active }
         val offline = r.clients.filter { !it.active }
-        SectionTitle("Устройства · ${online.size}")
+        Row(verticalAlignment = Alignment.Bottom) {
+            SectionTitle("Устройства · ${online.size}", Modifier.weight(1f))
+            Pill(
+                when {
+                    "limitall" in busy -> "Применяю…"
+                    r.unknownLimit != null -> "Всем ≤ ${fmtLimit(r.unknownLimit)}"
+                    else -> "Ограничить всех"
+                },
+                busy = "limitall" in busy,
+            ) { limitAll = true }
+        }
         online.forEach { cl -> ClientRow(cl) { limitFor = cl } }
         if (offline.isNotEmpty()) {
             Text(
@@ -935,33 +948,12 @@ private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
     }
 
     limitFor?.let { cl ->
-        AlertDialog(
-            onDismissRequest = { limitFor = null },
-            containerColor = C.Raised,
-            title = { Text(cl.name) },
-            text = {
-                Column {
-                    Text(listOfNotNull(cl.ip.takeIf { it.isNotEmpty() }, cl.mac.uppercase()).joinToString(" · "), color = C.Text3, style = Num.copy(fontSize = 13.sp))
-                    Spacer(Modifier.height(12.dp))
-                    listOf(null, 1000, 3000, 5000, 10000, 20000).forEach { kbps ->
-                        val sel = cl.limitKbps == kbps
-                        Text(
-                            if (kbps == null) "Без ограничения" else "${kbps / 1000} Мбит/с",
-                            color = if (sel) C.Blue else C.Text, fontFamily = Onest, fontSize = 16.sp,
-                            fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
-                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
-                                .clickable {
-                                    Ops.run(ctx, "limit:${cl.mac}") { Ops.limit(it, cl.mac, kbps) }
-                                    limitFor = null
-                                }
-                                .padding(vertical = 12.dp, horizontal = 4.dp),
-                        )
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = { TextButton(onClick = { limitFor = null }) { Text("Отмена", color = C.Text2) } },
-        )
+        LimitDialog(cl.name, listOfNotNull(cl.ip.takeIf { it.isNotEmpty() }, cl.mac.uppercase()).joinToString(" · "), cl.limitKbps,
+            onClose = { limitFor = null }) { kbps -> Ops.run(ctx, "limit:${cl.mac}") { Ops.limit(it, cl, kbps) } }
+    }
+    if (limitAll) {
+        LimitDialog("Все устройства", "Новые устройства тоже получат это ограничение", r?.unknownLimit,
+            onClose = { limitAll = false }) { kbps -> Ops.run(ctx, "limitall") { Ops.limitAll(it, kbps) } }
     }
 
     if (confirmReboot) {
@@ -981,6 +973,34 @@ private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
 }
 
 @Composable
+private fun LimitDialog(title: String, sub: String, current: Int?, onClose: () -> Unit, onPick: (Int?) -> Unit) {
+    AlertDialog(
+        onDismissRequest = onClose,
+        containerColor = C.Raised,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text(sub, color = C.Text3, style = Num.copy(fontSize = 13.sp))
+                Spacer(Modifier.height(12.dp))
+                listOf(null, 1000, 3000, 5000, 10000, 20000).forEach { kbps ->
+                    val sel = current == kbps
+                    Text(
+                        if (kbps == null) "Без ограничения" else "${kbps / 1000} Мбит/с",
+                        color = if (sel) C.Blue else C.Text, fontFamily = Onest, fontSize = 16.sp,
+                        fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Normal,
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+                            .clickable { onPick(kbps); onClose() }
+                            .padding(vertical = 12.dp, horizontal = 4.dp),
+                    )
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onClose) { Text("Отмена", color = C.Text2) } },
+    )
+}
+
+@Composable
 private fun ClientRow(cl: Client, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onClick).padding(vertical = 8.dp),
@@ -988,12 +1008,14 @@ private fun ClientRow(cl: Client, onClick: () -> Unit) {
     ) {
         Column(Modifier.weight(1f)) {
             Text(cl.name, color = if (cl.active) C.Text else C.Text3, fontFamily = Onest, fontSize = 15.sp, maxLines = 1)
-            Row {
-                Text(fmtBytes(cl.down + cl.up), color = C.Text3, style = Num.copy(fontSize = 13.sp))
-                cl.limitKbps?.let {
-                    Text(" · ≤ ${it / 1000} Мбит/с", color = C.Amber, style = Num.copy(fontSize = 13.sp))
-                }
-            }
+            Text(fmtBytes(cl.down + cl.up), color = C.Text3, style = Num.copy(fontSize = 13.sp))
+        }
+        cl.limitKbps?.let {
+            Text(
+                "≤ ${fmtLimit(it)}", color = C.Amber, style = Num.copy(fontSize = 13.sp, fontWeight = FontWeight.Medium),
+                modifier = Modifier.padding(end = 12.dp).clip(RoundedCornerShape(50)).background(C.Amber.copy(alpha = 0.12f))
+                    .padding(horizontal = 8.dp, vertical = 2.dp),
+            )
         }
         if (cl.active) {
             val d = cl.downMbps ?: 0.0

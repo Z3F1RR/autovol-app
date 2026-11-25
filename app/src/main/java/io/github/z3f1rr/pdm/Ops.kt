@@ -150,13 +150,34 @@ object Ops {
         Monitor.post { Monitor.message.value = "Основной канал переключён" }
     }
 
-    fun limit(ctx: Context, mac: String, kbps: Int?) {
-        needKeenetic(ctx).limit(mac, kbps)
+    fun limit(ctx: Context, c: Client, kbps: Int?) {
+        val k = needKeenetic(ctx)
+        k.limit(c, kbps)
+        refreshLimits(k)
+        Monitor.post { Monitor.message.value = if (kbps == null) "${c.name}: без ограничения" else "${c.name}: до ${kbps / 1000} Мбит/с" }
+    }
+
+    fun limitAll(ctx: Context, kbps: Int?) {
+        val k = needKeenetic(ctx)
+        k.limitAll(router.value?.clients.orEmpty(), kbps)
+        refreshLimits(k)
+        Monitor.post { Monitor.message.value = if (kbps == null) "Ограничения сняты" else "Всем до ${kbps / 1000} Мбит/с" }
+    }
+
+    /** Re-reads the limits from the router, so the list shows what really got applied. */
+    private fun refreshLimits(k: Keenetic) {
+        val (hosts, unknown) = try { k.limits() } catch (e: Exception) { return }
         Monitor.post {
             router.value = router.value?.let { r ->
-                r.copy(clients = r.clients.map { if (it.mac == mac) it.copy(limitKbps = kbps) else it })
+                r.copy(
+                    unknownLimit = unknown,
+                    clients = r.clients.map { c ->
+                        // a device limited just now got registered by the router
+                        val reg = c.registered || c.mac in hosts
+                        c.copy(registered = reg, limitKbps = hosts[c.mac] ?: if (!reg) unknown else null)
+                    },
+                )
             }
-            Monitor.message.value = if (kbps == null) "Ограничение снято" else "Ограничено до ${kbps / 1000} Мбит/с"
         }
     }
 
