@@ -9,6 +9,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
@@ -16,20 +20,25 @@ import android.os.PowerManager
 import java.util.concurrent.Executors
 
 /**
- * Foreground service with two independent loops: one polls the modems (local, cheap), the other
- * checks the internet through the router (can take seconds when packets vanish). Every network call
- * has timeouts and every iteration is wrapped in try/catch, so one failure never stops monitoring.
+ * Foreground service with independent loops: modems (local, cheap), internet (can take seconds when
+ * packets vanish) and, while it runs, the UPS test. Off the train Wi-Fi the modem and internet loops
+ * pause, release the wake locks and sleep until Android reports a Wi-Fi change.
  */
 class MonitorService : Service() {
     private val modemLock = Object()
     private val netLock = Object()
+    private val upsLock = Object()
     private val actions = Executors.newSingleThreadExecutor()
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private val history = List(2) { ArrayDeque<Point>() }
+    private var callback: ConnectivityManager.NetworkCallback? = null
 
     @Volatile private var running = false
     @Volatile private var modems: List<ModemState> = emptyList()
+    @Volatile private var onTrain = false
+    @Volatile private var lastPlace = Place.NO_WIFI
+    @Volatile private var upsThread: Thread? = null
 
     // Internet state: a change is accepted only after two checks in a row agree.
     @Volatile private var confirmed: Net? = null
@@ -43,7 +52,12 @@ class MonitorService : Service() {
     override fun onCreate() {
         super.onCreate()
         createChannels(this)
-        Monitor.post { if (Monitor.speed.value == null) Monitor.speed.value = Monitor.loadSpeed(this) }
+        val speed = Monitor.loadSpeed(this)
+        val ups = Monitor.loadUps(this)
+        Monitor.post {
+            if (Monitor.speed.value == null) Monitor.speed.value = speed
+            Monitor.ups.value = ups
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -58,8 +72,21 @@ class MonitorService : Service() {
                 actions.execute { modemAction(i, reboot) }
             }
             ACTION_SPEED -> actions.execute { speedTest() }
+            ACTION_UPS_START -> {
+                val now = System.currentTimeMillis()
+                val u = Ups(start = now, lastSeen = now)
+                Monitor.saveUps(this, u)
+                Monitor.post { Monitor.ups.value = u }
+            }
+            ACTION_UPS_STOP -> finishUps(manual = true)
+            ACTION_UPS_RESET -> {
+                Monitor.saveUps(this, null)
+                Monitor.post { Monitor.ups.value = null }
+            }
         }
         startLoops()
+        ensureUpsLoop()
+        updateLocks()
         wake()
         return START_STICKY
     }
@@ -79,24 +106,13 @@ class MonitorService : Service() {
             return
         }
         running = true
-        wakeLock = getSystemService(PowerManager::class.java)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pdm:monitor").apply {
-                setReferenceCounted(false)
-                acquire()
-            }
-        @Suppress("DEPRECATION")
-        wifiLock = getSystemService(WifiManager::class.java)
-            ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "pdm:wifi")?.apply {
-                setReferenceCounted(false)
-                acquire()
-            }
         Monitor.post { Monitor.running.value = true }
-        Thread({ loop(modemLock) { pollModems(); Monitor.intervalSec(this) * 1000L } }, "pdm-modems")
-            .apply { isDaemon = true; start() }
-        Thread({ loop(netLock) { checkNet(); if (recheckSoon) 3000L else Monitor.intervalSec(this) * 1000L } }, "pdm-net")
-            .apply { isDaemon = true; start() }
+        registerWifiCallback()
+        Thread({ loop(modemLock) { pollModems() } }, "pdm-modems").apply { isDaemon = true; start() }
+        Thread({ loop(netLock) { checkNet() } }, "pdm-net").apply { isDaemon = true; start() }
     }
 
+    /** Runs [body] again after the delay it returns (ms); a Wi-Fi change or "refresh" wakes it early. */
     private fun loop(lock: Object, body: () -> Long) {
         while (running) {
             val wait = try {
@@ -111,10 +127,67 @@ class MonitorService : Service() {
     private fun wake() {
         synchronized(modemLock) { modemLock.notifyAll() }
         synchronized(netLock) { netLock.notifyAll() }
+        synchronized(upsLock) { upsLock.notifyAll() }
     }
 
-    private fun pollModems() {
-        val wifi = Monitor.wifiNetwork(this)
+    private fun registerWifiCallback() {
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) { Monitor.resetPlace(); wake() }
+            override fun onLost(network: Network) { Monitor.resetPlace(); wake() }
+            override fun onLinkPropertiesChanged(network: Network, lp: android.net.LinkProperties) { Monitor.resetPlace(); wake() }
+        }
+        try {
+            cm.registerNetworkCallback(
+                NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI).build(), cb,
+            )
+            callback = cb
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Wake locks only while there is something to watch: on the train Wi-Fi, or during the UPS test. */
+    @Synchronized
+    private fun updateLocks() {
+        val need = running && (onTrain || upsRunning())
+        val wl = wakeLock ?: getSystemService(PowerManager::class.java)
+            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pdm:monitor").apply { setReferenceCounted(false) }
+            .also { wakeLock = it }
+        @Suppress("DEPRECATION")
+        val wf = wifiLock ?: getSystemService(WifiManager::class.java)
+            ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "pdm:wifi")?.apply { setReferenceCounted(false) }
+            ?.also { wifiLock = it }
+        try {
+            if (need) {
+                if (!wl.isHeld) wl.acquire()
+                if (wf != null && !wf.isHeld) wf.acquire()
+            } else {
+                if (wl.isHeld) wl.release()
+                if (wf != null && wf.isHeld) wf.release()
+            }
+        } catch (_: Exception) {
+        }
+    }
+
+    /** Checks where we are; off the train it publishes the pause and returns false. */
+    private fun atTrain(): Network? {
+        val (place, network) = Monitor.place(this)
+        lastPlace = place
+        val was = onTrain
+        onTrain = place == Place.TRAIN
+        if (was != onTrain) updateLocks()
+        if (onTrain) return network
+        val paused = if (place == Place.NO_WIFI) Net.NO_WIFI else Net.FOREIGN
+        if (confirmed != paused) {
+            confirmed = paused; pending = null; latency = null; since = System.currentTimeMillis()
+        }
+        modems = emptyList()
+        publish()
+        return null
+    }
+
+    private fun pollModems(): Long {
+        val wifi = atTrain() ?: return pausedWait()
         val states = Monitor.config(this).map { m ->
             try {
                 HiLink(m.ip, wifi).read()
@@ -134,16 +207,19 @@ class MonitorService : Service() {
         }
         Monitor.post { Monitor.history.value = hist }
         publish()
+        return Monitor.intervalSec(this) * 1000L
     }
 
-    private fun checkNet() {
-        val (raw, ms) = Monitor.check(Monitor.wifiNetwork(this), Monitor.server(this))
+    private fun checkNet(): Long {
+        val wifi = atTrain() ?: return pausedWait()
+        val (raw, ms) = Monitor.check(wifi, Monitor.server(this))
         val now = System.currentTimeMillis()
         val prev = confirmed
+        val paused = prev == null || prev == Net.NO_WIFI || prev == Net.FOREIGN
         var changed = false
         when {
-            prev == null || raw == Net.NO_WIFI || prev == Net.NO_WIFI -> {
-                if (raw != prev) { since = now; changed = prev != null }
+            paused -> {
+                if (raw != prev) since = now
                 confirmed = raw; pending = null
             }
             raw == prev -> pending = null
@@ -154,10 +230,14 @@ class MonitorService : Service() {
         if (confirmed == raw) latency = ms
         publish()
         val cur = confirmed
-        if (changed && cur != null && cur != Net.NO_WIFI && prev != Net.NO_WIFI) {
+        if (changed && cur != null) {
             getSystemService(NotificationManager::class.java).notify(ID_ALERT, buildAlert(cur))
         }
+        return if (recheckSoon) 3000L else Monitor.intervalSec(this) * 1000L
     }
+
+    /** No Wi-Fi: sleep until Android reports one. Other Wi-Fi: look again in a minute. */
+    private fun pausedWait(): Long = if (lastPlace == Place.NO_WIFI) 10 * 60_000L else 60_000L
 
     @Synchronized
     private fun publish() {
@@ -169,6 +249,47 @@ class MonitorService : Service() {
         } catch (_: Exception) {
         }
     }
+
+    // ---------------------------------------------------------------- UPS test
+
+    private fun upsRunning(): Boolean = Monitor.loadUps(this)?.let { it.end == null } == true
+
+    private fun ensureUpsLoop() {
+        if (!running || !upsRunning() || upsThread?.isAlive == true) return
+        upsThread = Thread({ loop(upsLock) { upsTick() } }, "pdm-ups").apply { isDaemon = true; start() }
+    }
+
+    /** Router answering → still on battery; silent for 5 minutes → the UPS is empty. */
+    private fun upsTick(): Long {
+        val u = Monitor.loadUps(this) ?: return Long.MAX_VALUE / 4
+        if (u.end != null) return Long.MAX_VALUE / 4
+        val now = System.currentTimeMillis()
+        val next = if (Monitor.routerAlive(this)) {
+            u.copy(lastSeen = now, downSince = null, gaps = if (u.downSince != null) u.gaps + 1 else u.gaps)
+        } else {
+            val down = u.downSince ?: now
+            if (now - down >= UPS_DEAD_MS) u.copy(end = u.lastSeen, downSince = down) else u.copy(downSince = down)
+        }
+        Monitor.saveUps(this, next)
+        Monitor.post { Monitor.ups.value = next }
+        if (next.end != null) {
+            updateLocks()
+            getSystemService(NotificationManager::class.java).notify(ID_ALERT, buildUpsDone(next))
+            return Long.MAX_VALUE / 4
+        }
+        return 5000L
+    }
+
+    private fun finishUps(manual: Boolean) {
+        val u = Monitor.loadUps(this) ?: return
+        if (u.end != null) return
+        val done = u.copy(end = if (manual && u.downSince == null) System.currentTimeMillis() else u.lastSeen)
+        Monitor.saveUps(this, done)
+        Monitor.post { Monitor.ups.value = done }
+        updateLocks()
+    }
+
+    // ---------------------------------------------------------------- actions
 
     private fun speedTest() {
         Monitor.post { Monitor.speedRunning.value = true }
@@ -198,21 +319,24 @@ class MonitorService : Service() {
         wake()
     }
 
-    private fun stopAll() {
+    private fun releaseAll() {
         running = false
         wake()
-        try { wakeLock?.release() } catch (_: Exception) {}
-        try { wifiLock?.release() } catch (_: Exception) {}
+        try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        try { wifiLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}
+        try { callback?.let { getSystemService(ConnectivityManager::class.java)?.unregisterNetworkCallback(it) } } catch (_: Exception) {}
+        callback = null
+    }
+
+    private fun stopAll() {
+        releaseAll()
         Monitor.post { Monitor.running.value = false; Monitor.snapshot.value = null }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 
     override fun onDestroy() {
-        running = false
-        wake()
-        try { wakeLock?.release() } catch (_: Exception) {}
-        try { wifiLock?.release() } catch (_: Exception) {}
+        releaseAll()
         actions.shutdownNow()
         Monitor.post { Monitor.running.value = false }
         super.onDestroy()
@@ -222,8 +346,14 @@ class MonitorService : Service() {
 
     private fun buildStatus(s: Snapshot?): Notification {
         val cfg = Monitor.config(this)
-        val body = if (s == null) "Проверяю…" else s.modems.mapIndexed { i, m -> line(cfg.getOrNull(i)?.name ?: "?", m) }.joinToString("\n")
-        return Notification.Builder(this, CH_STATUS)
+        val paused = s?.net == Net.NO_WIFI || s?.net == Net.FOREIGN
+        val body = when {
+            s == null -> "Проверяю…"
+            s.net == Net.NO_WIFI -> "Wi-Fi выключен или нет сети рядом"
+            s.net == Net.FOREIGN -> "Телефон подключён к другой сети"
+            else -> s.modems.mapIndexed { i, m -> line(cfg.getOrNull(i)?.name ?: "?", m) }.joinToString("\n")
+        }
+        val b = Notification.Builder(this, CH_STATUS)
             .setSmallIcon(R.drawable.ic_stat)
             .setContentTitle(if (s == null) "Вагон" else title(s))
             .setContentText(body.lineSequence().firstOrNull() ?: "")
@@ -232,8 +362,8 @@ class MonitorService : Service() {
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setContentIntent(openApp())
-            .addAction(action("Обновить", Intent(this, MonitorService::class.java), 10))
-            .build()
+        if (!paused) b.addAction(action("Обновить", Intent(this, MonitorService::class.java), 10))
+        return b.build()
     }
 
     private fun buildAlert(net: Net): Notification =
@@ -248,6 +378,14 @@ class MonitorService : Service() {
             )
             .setAutoCancel(true)
             .setTimeoutAfter(5 * 60_000)
+            .setContentIntent(openApp())
+            .build()
+
+    private fun buildUpsDone(u: Ups): Notification =
+        Notification.Builder(this, CH_ALERT)
+            .setSmallIcon(R.drawable.ic_stat)
+            .setContentTitle("ИБП продержал роутер " + fmtDuration((u.end ?: u.lastSeen) - u.start))
+            .setAutoCancel(true)
             .setContentIntent(openApp())
             .build()
 
@@ -266,11 +404,20 @@ class MonitorService : Service() {
         const val ACTION_REBOOT = "pdm.REBOOT"
         const val ACTION_RECONNECT = "pdm.RECONNECT"
         const val ACTION_SPEED = "pdm.SPEED"
+        const val ACTION_UPS_START = "pdm.UPS_START"
+        const val ACTION_UPS_STOP = "pdm.UPS_STOP"
+        const val ACTION_UPS_RESET = "pdm.UPS_RESET"
         const val EXTRA_INDEX = "index"
+        const val UPS_DEAD_MS = 5 * 60_000L
         private const val CH_STATUS = "status"
         private const val CH_ALERT = "alert"
         private const val ID_STATUS = 1
         private const val ID_ALERT = 2
+
+        fun fmtDuration(ms: Long): String {
+            val m = ms / 60_000
+            return if (m < 60) "$m мин" else "${m / 60} ч ${m % 60} мин"
+        }
 
         fun title(s: Snapshot): String {
             val min = (s.time - s.since) / 60_000
@@ -279,7 +426,7 @@ class MonitorService : Service() {
                 Net.FULL -> "Интернет есть" + (s.latencyMs?.let { " · $it мс" } ?: "")
                 Net.WHITELIST -> "Только белые списки$dur"
                 Net.NONE -> "Нет интернета$dur"
-                Net.NO_WIFI -> "Телефон не в Wi-Fi вагона"
+                Net.NO_WIFI, Net.FOREIGN -> "Проверки на паузе"
             }
         }
 

@@ -153,6 +153,7 @@ class MainActivity : ComponentActivity() {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
         if (Monitor.speed.value == null) Monitor.speed.value = Monitor.loadSpeed(this)
+        Monitor.ups.value = Monitor.loadUps(this)
         if (getSharedPreferences("pdm", MODE_PRIVATE).getBoolean("auto", true)) MonitorService.start(this)
         setContent {
             MaterialTheme(colorScheme = Scheme, typography = onestTypography()) { Screen() }
@@ -210,7 +211,8 @@ private fun Screen() {
                 )
             }
 
-            if (running) {
+            val paused = snap?.net == Net.NO_WIFI || snap?.net == Net.FOREIGN
+            if (running && !paused) {
                 cfg.forEachIndexed { i, c ->
                     ModemCard(
                         c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(),
@@ -219,6 +221,8 @@ private fun Screen() {
                     )
                 }
             }
+
+            UpsCard(now)
 
             BatteryHint()
         }
@@ -256,7 +260,8 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
     val (tone, title, sub) = when {
         !running -> Triple(C.Text3, "Мониторинг выключен", "Включите в настройках")
         s == null -> Triple(C.Text3, "Проверяю…", "")
-        s.net == Net.NO_WIFI -> Triple(C.Text3, "Нет Wi-Fi вагона", "Подключитесь к роутеру")
+        s.net == Net.NO_WIFI -> Triple(C.Text3, "На паузе", "Wi-Fi выключен или сети вагона нет рядом")
+        s.net == Net.FOREIGN -> Triple(C.Text3, "На паузе", "Телефон подключён к другой сети")
         s.net == Net.FULL -> Triple(C.Green, "Интернет есть", s.latencyMs?.let { "Отклик $it мс" } ?: "")
         s.net == Net.WHITELIST -> Triple(C.Amber, "Белые списки", listOf("Только разрешённые сайты", dur).filter { it.isNotEmpty() }.joinToString(" · "))
         else -> Triple(C.Red, "Нет интернета", if (dur.isNotEmpty()) "Уже $dur" else "")
@@ -274,7 +279,7 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
             .padding(22.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            PulseDot(tone, live = running && s != null)
+            PulseDot(tone, live = running && s != null && s.net != Net.NO_WIFI && s.net != Net.FOREIGN)
             Spacer(Modifier.weight(1f))
             if (running && age != null) {
                 Text(
@@ -291,7 +296,7 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
             Text(sub, color = C.Text2, style = Num.copy(fontSize = 15.sp))
         }
 
-        if (running && server.isNotEmpty()) {
+        if (running && server.isNotEmpty() && s?.net != Net.NO_WIFI && s?.net != Net.FOREIGN) {
             Spacer(Modifier.height(18.dp))
             Box(Modifier.fillMaxWidth().height(1.dp).background(C.Line))
             Spacer(Modifier.height(16.dp))
@@ -450,6 +455,70 @@ private fun Spark(h: List<Point>) {
         line({ it.rsrp }, -125f, -65f, C.Blue)
         line({ it.sinr }, -10f, 30f, C.Amber.copy(alpha = 0.85f))
     }
+}
+
+// ---------------------------------------------------------------- UPS test (temporary)
+
+@Composable
+private fun UpsCard(now: Long) {
+    val ctx = LocalContext.current
+    val u = Monitor.ups.value
+    var confirmReset by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.Surface).padding(20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Тест ИБП", color = C.Text, fontFamily = Onest, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            when {
+                u == null -> Pill("Старт", busy = false) { MonitorService.start(ctx, MonitorService.ACTION_UPS_START) }
+                u.end == null -> Pill("Стоп", busy = false) { MonitorService.start(ctx, MonitorService.ACTION_UPS_STOP) }
+                else -> Pill("Сбросить", busy = false) { confirmReset = true }
+            }
+        }
+        when {
+            u == null -> {
+                Spacer(Modifier.height(6.dp))
+                Text("Нажмите «Старт» и сразу выключите питание ИБП. Телефон держите рядом с роутером — " +
+                    "засеку, когда роутер перестанет отвечать.", color = C.Text2, style = MaterialTheme.typography.bodyMedium)
+            }
+            u.end == null -> {
+                Spacer(Modifier.height(10.dp))
+                Text(clock(now - u.start), color = C.Text, style = Num.copy(fontSize = 40.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-1).sp))
+                val down = u.downSince
+                Text(
+                    if (down == null) "Роутер отвечает · проверка ${((now - u.lastSeen) / 1000).coerceAtLeast(0)} с назад"
+                    else "Роутер молчит ${clock(now - down)} · итог через ${clock((down + MonitorService.UPS_DEAD_MS - now).coerceAtLeast(0))}",
+                    color = if (down == null) C.Text2 else C.Amber, style = Num.copy(fontSize = 14.sp),
+                )
+                if (u.gaps > 0) Text("Роутер перезагружался: ${u.gaps}", color = C.Amber, style = Num.copy(fontSize = 14.sp))
+            }
+            else -> {
+                Spacer(Modifier.height(10.dp))
+                Text(MonitorService.fmtDuration(u.end - u.start), color = C.Green,
+                    style = Num.copy(fontSize = 40.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-1).sp))
+                Text(
+                    "Роутер работал от ИБП с " + SimpleDateFormat("HH:mm", Locale.US).format(Date(u.start)) +
+                        " до " + SimpleDateFormat("HH:mm", Locale.US).format(Date(u.end)) +
+                        if (u.gaps > 0) " · перезагрузок: ${u.gaps}" else "",
+                    color = C.Text2, style = Num.copy(fontSize = 14.sp),
+                )
+            }
+        }
+    }
+    if (confirmReset) {
+        AlertDialog(
+            onDismissRequest = { confirmReset = false },
+            containerColor = C.Raised,
+            title = { Text("Сбросить результат?") },
+            confirmButton = {
+                TextButton(onClick = { MonitorService.start(ctx, MonitorService.ACTION_UPS_RESET); confirmReset = false }) { Text("Сбросить") }
+            },
+            dismissButton = { TextButton(onClick = { confirmReset = false }) { Text("Отмена", color = C.Text2) } },
+        )
+    }
+}
+
+private fun clock(ms: Long): String {
+    val s = ms / 1000
+    return if (s >= 3600) "%d:%02d:%02d".format(s / 3600, s / 60 % 60, s % 60) else "%d:%02d".format(s / 60, s % 60)
 }
 
 // ---------------------------------------------------------------- hints and settings

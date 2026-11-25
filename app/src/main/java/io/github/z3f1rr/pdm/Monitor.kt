@@ -14,8 +14,21 @@ import java.security.SecureRandom
 
 data class ModemConfig(val name: String, val ip: String)
 
-/** What the router can actually reach right now. */
-enum class Net { FULL, WHITELIST, NONE, NO_WIFI }
+/** What the router can actually reach right now. NO_WIFI and FOREIGN mean checks are paused. */
+enum class Net { FULL, WHITELIST, NONE, NO_WIFI, FOREIGN }
+
+/** Where the phone is: on the train router's Wi-Fi, without Wi-Fi, or on some other Wi-Fi. */
+enum class Place { TRAIN, NO_WIFI, FOREIGN }
+
+/** UPS runtime test, persisted so it survives the app being killed. */
+data class Ups(
+    val start: Long,
+    val lastSeen: Long,
+    val end: Long? = null,
+    val downSince: Long? = null,
+    /** How many times the router vanished and came back (reboots on low voltage). */
+    val gaps: Int = 0,
+)
 
 data class Snapshot(
     val modems: List<ModemState>,
@@ -39,6 +52,7 @@ object Monitor {
     val history = mutableStateOf<List<List<Point>>>(emptyList())
     val speed = mutableStateOf<Speed?>(null)
     val speedRunning = mutableStateOf(false)
+    val ups = mutableStateOf<Ups?>(null)
 
     private val main = Handler(Looper.getMainLooper())
     private val rnd = SecureRandom()
@@ -103,6 +117,86 @@ object Monitor {
         return cm.allNetworks.firstOrNull { n ->
             cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
         }
+    }
+
+    fun loadUps(ctx: Context): Ups? {
+        val p = prefs(ctx)
+        val start = p.getLong("ups_start", 0)
+        if (start == 0L) return null
+        return Ups(
+            start = start,
+            lastSeen = p.getLong("ups_last", start),
+            end = p.getLong("ups_end", 0).takeIf { it > 0 },
+            downSince = p.getLong("ups_down", 0).takeIf { it > 0 },
+            gaps = p.getInt("ups_gaps", 0),
+        )
+    }
+
+    fun saveUps(ctx: Context, u: Ups?) {
+        val e = prefs(ctx).edit()
+        if (u == null) {
+            e.remove("ups_start").remove("ups_last").remove("ups_end").remove("ups_down").remove("ups_gaps")
+        } else {
+            e.putLong("ups_start", u.start).putLong("ups_last", u.lastSeen)
+                .putLong("ups_end", u.end ?: 0).putLong("ups_down", u.downSince ?: 0).putInt("ups_gaps", u.gaps)
+        }
+        e.commit()
+    }
+
+    /** Default gateway of a network (the router), e.g. 192.168.1.1. */
+    fun gateway(ctx: Context, network: Network): String? {
+        val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return null
+        return cm.getLinkProperties(network)?.routes
+            ?.firstOrNull { it.isDefaultRoute && it.gateway is java.net.Inet4Address }
+            ?.gateway?.hostAddress
+    }
+
+    /** Any HTTP answer from the router's web interface. */
+    fun routerAlive(ctx: Context): Boolean {
+        val n = wifiNetwork(ctx) ?: return false
+        val gw = gateway(ctx, n) ?: return false
+        return try {
+            val c = open(n, "http://$gw/auth", connect = 2500, read = 3000)
+            try { c.responseCode > 0 } finally { c.disconnect() }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private var placeNet: Network? = null
+    private var placeOk = false
+    private var placeAt = 0L
+
+    /**
+     * Is the phone on the train router? Recognised without root or location permission: the gateway
+     * answers like a Keenetic web interface (401 with an X-NDM-Realm header), or one of the modems
+     * answers. The answer is cached per network for two minutes.
+     */
+    @Synchronized
+    fun place(ctx: Context): Pair<Place, Network?> {
+        val n = wifiNetwork(ctx) ?: return Place.NO_WIFI to null
+        val now = System.currentTimeMillis()
+        if (n == placeNet && now - placeAt < 120_000) return (if (placeOk) Place.TRAIN else Place.FOREIGN) to n
+        val keenetic = gateway(ctx, n)?.let { gw ->
+            try {
+                val c = open(n, "http://$gw/auth", connect = 2500, read = 3000)
+                try { c.responseCode == 401 && c.getHeaderField("X-NDM-Realm") != null } finally { c.disconnect() }
+            } catch (e: Exception) {
+                false
+            }
+        } ?: false
+        val ok = keenetic || config(ctx).any { m ->
+            try { HiLink(m.ip, n).read().ok } catch (e: Exception) { false }
+        }
+        // only a positive answer is cached: right after connecting the gateway may not be known yet
+        if (ok) { placeNet = n; placeOk = true; placeAt = now } else placeNet = null
+        return (if (ok) Place.TRAIN else Place.FOREIGN) to n
+    }
+
+    /** Forget the cached answer: called when Wi-Fi connects or disconnects. */
+    @Synchronized
+    fun resetPlace() {
+        placeNet = null
     }
 
     /**
