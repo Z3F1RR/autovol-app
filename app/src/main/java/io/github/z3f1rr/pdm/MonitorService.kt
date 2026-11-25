@@ -16,26 +16,34 @@ import android.os.PowerManager
 import java.util.concurrent.Executors
 
 /**
- * Foreground service: polls the modems every few seconds on its own thread. Every network call has
- * timeouts and every cycle is wrapped in try/catch, so one failure never stops the monitoring.
+ * Foreground service with two independent loops: one polls the modems (local, cheap), the other
+ * checks the internet through the router (can take seconds when packets vanish). Every network call
+ * has timeouts and every iteration is wrapped in try/catch, so one failure never stops monitoring.
  */
 class MonitorService : Service() {
-    private val lock = Object()
-    private var thread: Thread? = null
+    private val modemLock = Object()
+    private val netLock = Object()
     private val actions = Executors.newSingleThreadExecutor()
     private var wakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
     private val history = List(2) { ArrayDeque<Point>() }
 
     @Volatile private var running = false
-    @Volatile private var lastNet: Net? = null
-    @Volatile private var since: Long = 0
+    @Volatile private var modems: List<ModemState> = emptyList()
+
+    // Internet state: a change is accepted only after two checks in a row agree.
+    @Volatile private var confirmed: Net? = null
+    @Volatile private var latency: Int? = null
+    @Volatile private var since = 0L
+    private var pending: Net? = null
+    @Volatile private var recheckSoon = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         createChannels(this)
+        Monitor.post { if (Monitor.speed.value == null) Monitor.speed.value = Monitor.loadSpeed(this) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -49,16 +57,17 @@ class MonitorService : Service() {
                 val reboot = intent.action == ACTION_REBOOT
                 actions.execute { modemAction(i, reboot) }
             }
+            ACTION_SPEED -> actions.execute { speedTest() }
         }
-        startLoop()
+        startLoops()
         wake()
         return START_STICKY
     }
 
-    private fun startLoop() {
+    private fun startLoops() {
         if (running) return
-        val n = buildStatus(null, "Запуск…")
         try {
+            val n = buildStatus(null)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(ID_STATUS, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
             } else {
@@ -82,57 +91,93 @@ class MonitorService : Service() {
                 acquire()
             }
         Monitor.post { Monitor.running.value = true }
-        thread = Thread({ loop() }, "pdm-monitor").apply { isDaemon = true; start() }
+        Thread({ loop(modemLock) { pollModems(); Monitor.intervalSec(this) * 1000L } }, "pdm-modems")
+            .apply { isDaemon = true; start() }
+        Thread({ loop(netLock) { checkNet(); if (recheckSoon) 3000L else Monitor.intervalSec(this) * 1000L } }, "pdm-net")
+            .apply { isDaemon = true; start() }
     }
 
-    private fun loop() {
+    private fun loop(lock: Object, body: () -> Long) {
         while (running) {
-            try {
-                cycle()
+            val wait = try {
+                body()
             } catch (t: Throwable) {
-                Monitor.post { Monitor.message.value = "Ошибка опроса: ${t.message}" }
+                5000L
             }
-            synchronized(lock) {
-                if (running) lock.wait(Monitor.intervalSec(this) * 1000L)
-            }
+            synchronized(lock) { if (running) lock.wait(wait) }
         }
     }
 
-    private fun wake() = synchronized(lock) { lock.notifyAll() }
+    private fun wake() {
+        synchronized(modemLock) { modemLock.notifyAll() }
+        synchronized(netLock) { netLock.notifyAll() }
+    }
 
-    private fun cycle() {
-        val cfg = Monitor.config(this)
+    private fun pollModems() {
         val wifi = Monitor.wifiNetwork(this)
-        val states = cfg.map { m ->
+        val states = Monitor.config(this).map { m ->
             try {
                 HiLink(m.ip, wifi).read()
             } catch (e: Exception) {
                 ModemState(ok = false, error = e.javaClass.simpleName)
             }
         }
-        val (net, ms) = Monitor.check(wifi)
+        modems = states
         val now = System.currentTimeMillis()
-        val prev = lastNet
-        if (prev != net) since = now
-        val snap = Snapshot(states, net, ms, now, since)
-
-        states.forEachIndexed { i, s ->
-            val h = history[i]
-            if (s.ok) h.addLast(Point(now, s.rsrp, s.sinr))
-            while (h.isNotEmpty() && now - h.first().t > 30 * 60_000) h.removeFirst()
+        val hist = synchronized(history) {
+            states.forEachIndexed { i, s ->
+                val h = history[i]
+                if (s.ok && s.connected) h.addLast(Point(now, s.rsrp, s.sinr))
+                while (h.isNotEmpty() && now - h.first().t > 30 * 60_000) h.removeFirst()
+            }
+            history.map { it.toList() }
         }
-        val hist = history.map { it.toList() }
+        Monitor.post { Monitor.history.value = hist }
+        publish()
+    }
+
+    private fun checkNet() {
+        val (raw, ms) = Monitor.check(Monitor.wifiNetwork(this), Monitor.server(this))
+        val now = System.currentTimeMillis()
+        val prev = confirmed
+        var changed = false
+        when {
+            prev == null || raw == Net.NO_WIFI || prev == Net.NO_WIFI -> {
+                if (raw != prev) { since = now; changed = prev != null }
+                confirmed = raw; pending = null
+            }
+            raw == prev -> pending = null
+            pending == raw -> { confirmed = raw; since = now; pending = null; changed = true }
+            else -> pending = raw
+        }
+        recheckSoon = pending != null
+        if (confirmed == raw) latency = ms
+        publish()
+        val cur = confirmed
+        if (changed && cur != null && cur != Net.NO_WIFI && prev != Net.NO_WIFI) {
+            getSystemService(NotificationManager::class.java).notify(ID_ALERT, buildAlert(cur))
+        }
+    }
+
+    @Synchronized
+    private fun publish() {
+        val net = confirmed ?: return
+        val snap = Snapshot(modems, net, latency, System.currentTimeMillis(), since)
+        Monitor.post { Monitor.snapshot.value = snap }
+        try {
+            getSystemService(NotificationManager::class.java).notify(ID_STATUS, buildStatus(snap))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun speedTest() {
+        Monitor.post { Monitor.speedRunning.value = true }
+        val s = Monitor.speedTest(Monitor.wifiNetwork(this), Monitor.server(this))
+        if (s.error == null) Monitor.saveSpeed(this, s)
         Monitor.post {
-            Monitor.snapshot.value = snap
-            Monitor.history.value = hist
+            Monitor.speedRunning.value = false
+            if (s.error == null) Monitor.speed.value = s else Monitor.message.value = s.error
         }
-
-        val nm = getSystemService(NotificationManager::class.java)
-        nm.notify(ID_STATUS, buildStatus(snap, null))
-        if (prev != null && prev != net && net != Net.NO_WIFI && prev != Net.NO_WIFI) {
-            nm.notify(ID_ALERT, buildAlert(snap))
-        }
-        lastNet = net
     }
 
     private fun modemAction(i: Int, reboot: Boolean) {
@@ -141,10 +186,10 @@ class MonitorService : Service() {
             val h = HiLink(cfg.ip, Monitor.wifiNetwork(this))
             if (reboot) {
                 h.reboot()
-                "${cfg.name}: перезагружается, это около минуты"
+                "${cfg.name} перезагружается, около минуты"
             } else {
                 h.reconnect()
-                "${cfg.name}: передача данных перезапущена"
+                "${cfg.name} переподключён"
             }
         } catch (e: Exception) {
             "${cfg.name}: не удалось — ${e.message ?: e.javaClass.simpleName}"
@@ -158,7 +203,7 @@ class MonitorService : Service() {
         wake()
         try { wakeLock?.release() } catch (_: Exception) {}
         try { wifiLock?.release() } catch (_: Exception) {}
-        Monitor.post { Monitor.running.value = false }
+        Monitor.post { Monitor.running.value = false; Monitor.snapshot.value = null }
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
@@ -175,31 +220,32 @@ class MonitorService : Service() {
 
     // ---------------------------------------------------------------- notifications
 
-    private fun buildStatus(s: Snapshot?, text: String?): Notification {
+    private fun buildStatus(s: Snapshot?): Notification {
         val cfg = Monitor.config(this)
-        val body = text ?: s!!.modems.mapIndexed { i, m -> line(cfg[i].name, m) }.joinToString("\n")
-        val b = Notification.Builder(this, CH_STATUS)
+        val body = if (s == null) "Проверяю…" else s.modems.mapIndexed { i, m -> line(cfg.getOrNull(i)?.name ?: "?", m) }.joinToString("\n")
+        return Notification.Builder(this, CH_STATUS)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle(if (s == null) "ПДМ-статус" else title(s))
-            .setContentText(body.lineSequence().first())
+            .setContentTitle(if (s == null) "Вагон" else title(s))
+            .setContentText(body.lineSequence().firstOrNull() ?: "")
             .setStyle(Notification.BigTextStyle().bigText(body))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setShowWhen(s != null)
-            .setWhen(s?.time ?: 0)
+            .setShowWhen(false)
             .setContentIntent(openApp())
             .addAction(action("Обновить", Intent(this, MonitorService::class.java), 10))
-        cfg.forEachIndexed { i, m ->
-            val it = Intent(this, MonitorService::class.java).setAction(ACTION_REBOOT).putExtra(EXTRA_INDEX, i)
-            b.addAction(action("Перезапуск ${m.name}", it, 20 + i))
-        }
-        return b.build()
+            .build()
     }
 
-    private fun buildAlert(s: Snapshot): Notification =
+    private fun buildAlert(net: Net): Notification =
         Notification.Builder(this, CH_ALERT)
             .setSmallIcon(R.drawable.ic_stat)
-            .setContentTitle(title(s))
+            .setContentTitle(
+                when (net) {
+                    Net.FULL -> "Интернет вернулся"
+                    Net.WHITELIST -> "Только белые списки"
+                    else -> "Интернет пропал"
+                },
+            )
             .setAutoCancel(true)
             .setTimeoutAfter(5 * 60_000)
             .setContentIntent(openApp())
@@ -219,17 +265,20 @@ class MonitorService : Service() {
         const val ACTION_STOP = "pdm.STOP"
         const val ACTION_REBOOT = "pdm.REBOOT"
         const val ACTION_RECONNECT = "pdm.RECONNECT"
+        const val ACTION_SPEED = "pdm.SPEED"
         const val EXTRA_INDEX = "index"
         private const val CH_STATUS = "status"
         private const val CH_ALERT = "alert"
         private const val ID_STATUS = 1
         private const val ID_ALERT = 2
+
         fun title(s: Snapshot): String {
             val min = (s.time - s.since) / 60_000
+            val dur = if (min > 0) " · $min мин" else ""
             return when (s.net) {
-                Net.FULL -> "Интернет есть · ${s.latencyMs} мс"
-                Net.WHITELIST -> "Только белые списки" + if (min > 0) " · $min мин" else ""
-                Net.NONE -> "Нет интернета" + if (min > 0) " · $min мин" else ""
+                Net.FULL -> "Интернет есть" + (s.latencyMs?.let { " · $it мс" } ?: "")
+                Net.WHITELIST -> "Только белые списки$dur"
+                Net.NONE -> "Нет интернета$dur"
                 Net.NO_WIFI -> "Телефон не в Wi-Fi вагона"
             }
         }
@@ -238,7 +287,7 @@ class MonitorService : Service() {
             if (!m.ok) return "$name — не отвечает"
             if (!m.connected) return "$name — нет сети"
             val band = if (m.band.isNotEmpty()) " B${m.band}" else ""
-            return "$name ${m.net}$band · ${m.qualityWord} · ${m.rsrp ?: "—"} дБм / ${m.sinr ?: "—"} дБ"
+            return "$name ${m.net}$band · ${m.rsrp ?: "—"} / ${m.sinr ?: "—"} дБ"
         }
 
         fun createChannels(ctx: Context) {

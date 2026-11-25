@@ -9,10 +9,18 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,21 +43,22 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.ColorScheme
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -60,57 +69,103 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 
-/** Status tones: container background and the text/accent colour on it. */
-private data class Tone(val bg: Color, val fg: Color)
+// ---------------------------------------------------------------- design tokens
 
-private val GoodTone = Tone(Color(0xFF123B2A), Color(0xFF6EE7A8))
-private val WarnTone = Tone(Color(0xFF3B3012), Color(0xFFF6C453))
-private val BadTone = Tone(Color(0xFF451A1A), Color(0xFFFF8A80))
-private val RsrpLine = Color(0xFF7CB7FF)
-private val SinrLine = Color(0xFFF6C453)
+private object C {
+    val Bg = Color(0xFF0A0B0D)
+    val Surface = Color(0xFF141619)
+    val Raised = Color(0xFF1D2025)
+    val Line = Color(0xFF262A30)
+    val Text = Color(0xFFF3F4F6)
+    val Text2 = Color(0xFF9CA3AF)
+    val Text3 = Color(0xFF6B7280)
+    val Green = Color(0xFF34D399)
+    val Amber = Color(0xFFFBBF24)
+    val Red = Color(0xFFF87171)
+    val Blue = Color(0xFF60A5FA)
+}
+
+private val Onest = FontFamily(
+    Font(R.font.onest_regular, FontWeight.Normal),
+    Font(R.font.onest_medium, FontWeight.Medium),
+    Font(R.font.onest_semibold, FontWeight.SemiBold),
+    Font(R.font.onest_bold, FontWeight.Bold),
+)
+
+/** Tabular figures: numbers don't jump when they change. */
+private val Num = TextStyle(fontFamily = Onest, fontFeatureSettings = "tnum")
+
+private fun onestTypography(): Typography {
+    val t = Typography()
+    fun TextStyle.o() = copy(fontFamily = Onest)
+    return Typography(
+        displayLarge = t.displayLarge.o(), displayMedium = t.displayMedium.o(), displaySmall = t.displaySmall.o(),
+        headlineLarge = t.headlineLarge.o(), headlineMedium = t.headlineMedium.o(), headlineSmall = t.headlineSmall.o(),
+        titleLarge = t.titleLarge.o(), titleMedium = t.titleMedium.o(), titleSmall = t.titleSmall.o(),
+        bodyLarge = t.bodyLarge.o(), bodyMedium = t.bodyMedium.o(), bodySmall = t.bodySmall.o(),
+        labelLarge = t.labelLarge.o(), labelMedium = t.labelMedium.o(), labelSmall = t.labelSmall.o(),
+    )
+}
+
+private val Scheme = darkColorScheme(
+    primary = C.Blue, onPrimary = C.Bg,
+    background = C.Bg, onBackground = C.Text,
+    surface = C.Surface, onSurface = C.Text, onSurfaceVariant = C.Text2,
+    surfaceContainerLowest = C.Bg, surfaceContainerLow = C.Surface, surfaceContainer = C.Surface,
+    surfaceContainerHigh = C.Raised, surfaceContainerHighest = C.Raised,
+    secondaryContainer = C.Raised, onSecondaryContainer = C.Text,
+    outline = C.Line, outlineVariant = C.Line, error = C.Red,
+)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         MonitorService.createChannels(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
         }
+        if (Monitor.speed.value == null) Monitor.speed.value = Monitor.loadSpeed(this)
         if (getSharedPreferences("pdm", MODE_PRIVATE).getBoolean("auto", true)) MonitorService.start(this)
         setContent {
-            val ctx = LocalContext.current
-            val scheme: ColorScheme =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) dynamicDarkColorScheme(ctx)
-                else darkColorScheme(primary = Color(0xFF7CB7FF))
-            MaterialTheme(colorScheme = scheme) { Screen() }
+            MaterialTheme(colorScheme = Scheme, typography = onestTypography()) { Screen() }
         }
     }
 }
+
+// ---------------------------------------------------------------- screen
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun Screen() {
     val ctx = LocalContext.current
-    val cs = MaterialTheme.colorScheme
     val snap = Monitor.snapshot.value
     val running = Monitor.running.value
     val msg = Monitor.message.value
@@ -129,27 +184,29 @@ private fun Screen() {
     PullToRefreshBox(
         isRefreshing = refreshing,
         onRefresh = { refreshing = true; MonitorService.start(ctx) },
-        modifier = Modifier.fillMaxSize().background(cs.background),
+        modifier = Modifier.fillMaxSize().background(C.Bg),
     ) {
         Column(
             Modifier.fillMaxSize().safeDrawingPadding().verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+                .padding(horizontal = 16.dp).padding(top = 8.dp, bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Вагон", style = MaterialTheme.typography.titleLarge, color = cs.onBackground, modifier = Modifier.weight(1f))
+            Row(Modifier.padding(start = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Вагон", color = C.Text, fontFamily = Onest, fontSize = 30.sp, fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.5).sp, modifier = Modifier.weight(1f),
+                )
                 IconButton(onClick = { settings = true }) {
-                    Icon(Icons.Filled.Settings, contentDescription = "Настройки", tint = cs.onSurfaceVariant)
+                    Icon(Icons.Filled.Settings, contentDescription = "Настройки", tint = C.Text2)
                 }
             }
 
-            Hero(snap, running, now)
+            Status(snap, running, now)
 
             if (msg.isNotEmpty()) {
                 Text(
-                    msg, color = cs.onSecondaryContainer, style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                        .background(cs.secondaryContainer).padding(14.dp),
+                    msg, color = C.Text, style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(C.Raised).padding(14.dp),
                 )
             }
 
@@ -159,172 +216,224 @@ private fun Screen() {
                         c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(),
                         onReconnect = { MonitorService.start(ctx, MonitorService.ACTION_RECONNECT, i) },
                         onReboot = { reboot = i },
-                        onWeb = { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("http://${c.ip}"))) },
                     )
                 }
             }
 
             BatteryHint()
-
-            val age = snap?.let { ((now - it.time) / 1000).coerceAtLeast(0) }
-            Text(
-                when {
-                    !running -> ""
-                    age == null -> "Проверяю…"
-                    age < 5 -> "Обновлено только что"
-                    else -> "Обновлено $age с назад"
-                },
-                style = MaterialTheme.typography.labelMedium,
-                color = if (age != null && age > 60) BadTone.fg else cs.onSurfaceVariant,
-                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(top = 4.dp, bottom = 16.dp),
-            )
         }
     }
 
     reboot?.let { i ->
         AlertDialog(
             onDismissRequest = { reboot = null },
+            containerColor = C.Raised,
             title = { Text("Перезагрузить ${cfg[i].name}?") },
-            text = { Text("Канал пропадёт примерно на минуту.") },
+            text = { Text("Канал пропадёт примерно на минуту.", color = C.Text2) },
             confirmButton = {
                 TextButton(onClick = { MonitorService.start(ctx, MonitorService.ACTION_REBOOT, i); reboot = null }) {
-                    Text("Перезагрузить")
+                    Text("Перезагрузить", color = C.Red)
                 }
             },
-            dismissButton = { TextButton(onClick = { reboot = null }) { Text("Отмена") } },
+            dismissButton = { TextButton(onClick = { reboot = null }) { Text("Отмена", color = C.Text2) } },
         )
     }
 
     if (settings) {
-        ModalBottomSheet(onDismissRequest = { settings = false }) {
+        ModalBottomSheet(onDismissRequest = { settings = false }, containerColor = C.Surface) {
             SettingsSheet(running) { settings = false }
         }
     }
 }
 
+// ---------------------------------------------------------------- status card
+
 @Composable
-private fun Hero(s: Snapshot?, running: Boolean, now: Long) {
-    val cs = MaterialTheme.colorScheme
-    val neutral = Tone(cs.surfaceContainerHigh, cs.onSurface)
+private fun Status(s: Snapshot?, running: Boolean, now: Long) {
+    val ctx = LocalContext.current
     val mins = s?.let { (now - it.since) / 60_000 } ?: 0
+    val dur = if (mins > 0) fmtMin(mins) else ""
     val (tone, title, sub) = when {
-        !running -> Triple(neutral, "Мониторинг выключен", "Включите в настройках")
-        s == null -> Triple(neutral, "Проверяю…", "")
-        s.net == Net.NO_WIFI -> Triple(neutral, "Нет Wi-Fi вагона", "Подключитесь к роутеру")
-        s.net == Net.FULL -> Triple(GoodTone, "Интернет есть", "${s.latencyMs} мс")
-        s.net == Net.WHITELIST -> Triple(WarnTone, "Белые списки", "Работают только разрешённые сайты" + dur(mins))
-        else -> Triple(BadTone, "Нет интернета", if (mins > 0) "Уже ${fmtMin(mins)}" else "")
+        !running -> Triple(C.Text3, "Мониторинг выключен", "Включите в настройках")
+        s == null -> Triple(C.Text3, "Проверяю…", "")
+        s.net == Net.NO_WIFI -> Triple(C.Text3, "Нет Wi-Fi вагона", "Подключитесь к роутеру")
+        s.net == Net.FULL -> Triple(C.Green, "Интернет есть", s.latencyMs?.let { "Отклик $it мс" } ?: "")
+        s.net == Net.WHITELIST -> Triple(C.Amber, "Белые списки", listOf("Только разрешённые сайты", dur).filter { it.isNotEmpty() }.joinToString(" · "))
+        else -> Triple(C.Red, "Нет интернета", if (dur.isNotEmpty()) "Уже $dur" else "")
     }
+    val age = s?.let { ((now - it.time) / 1000).coerceAtLeast(0) }
+    val server = remember(s?.time) { Monitor.server(ctx) }
+    val speed = Monitor.speed.value
+    val measuring = Monitor.speedRunning.value
+
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp)).background(tone.bg).padding(horizontal = 22.dp, vertical = 24.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(28.dp))
+            .background(C.Surface)
+            .background(Brush.verticalGradient(listOf(tone.copy(alpha = 0.16f), tone.copy(alpha = 0.02f))))
+            .border(1.dp, tone.copy(alpha = 0.22f), RoundedCornerShape(28.dp))
+            .padding(22.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(tone.fg))
-            Spacer(Modifier.width(10.dp))
-            Text(title, color = tone.fg, fontSize = 30.sp, fontWeight = FontWeight.SemiBold, lineHeight = 34.sp)
+            PulseDot(tone, live = running && s != null)
+            Spacer(Modifier.weight(1f))
+            if (running && age != null) {
+                Text(
+                    if (age < 5) "сейчас" else "${age} с назад",
+                    color = if (age > 60) C.Red else C.Text3, style = Num.copy(fontSize = 13.sp),
+                )
+            }
         }
+        Spacer(Modifier.height(14.dp))
+        Text(title, color = tone, fontFamily = Onest, fontSize = 32.sp, fontWeight = FontWeight.SemiBold,
+            lineHeight = 36.sp, letterSpacing = (-0.5).sp)
         if (sub.isNotEmpty()) {
-            Spacer(Modifier.height(6.dp))
-            Text(sub, color = tone.fg.copy(alpha = 0.75f), style = MaterialTheme.typography.bodyLarge)
+            Spacer(Modifier.height(4.dp))
+            Text(sub, color = C.Text2, style = Num.copy(fontSize = 15.sp))
+        }
+
+        if (running && server.isNotEmpty()) {
+            Spacer(Modifier.height(18.dp))
+            Box(Modifier.fillMaxWidth().height(1.dp).background(C.Line))
+            Spacer(Modifier.height(16.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text("↓ " + fmtSpeed(speed?.downMbps), color = C.Text, style = Num.copy(fontSize = 22.sp, fontWeight = FontWeight.SemiBold))
+                        Spacer(Modifier.width(14.dp))
+                        Text("↑ " + fmtSpeed(speed?.upMbps), color = C.Text, style = Num.copy(fontSize = 22.sp, fontWeight = FontWeight.SemiBold))
+                    }
+                    Text(
+                        if (speed == null) "Мбит/с · ещё не измеряли"
+                        else "Мбит/с · " + SimpleDateFormat("HH:mm", Locale.US).format(Date(speed.time)),
+                        color = C.Text3, style = Num.copy(fontSize = 13.sp),
+                    )
+                }
+                Pill(
+                    text = if (measuring) "Замер…" else "Замерить",
+                    busy = measuring,
+                    onClick = { if (!measuring) MonitorService.start(ctx, MonitorService.ACTION_SPEED) },
+                )
+            }
         }
     }
 }
 
-private fun fmtMin(m: Long) = if (m < 60) "$m мин" else "${m / 60} ч ${m % 60} мин"
-private fun dur(m: Long) = if (m > 0) " · ${fmtMin(m)}" else ""
+@Composable
+private fun PulseDot(color: Color, live: Boolean) {
+    val t = rememberInfiniteTransition(label = "pulse")
+    val a by t.animateFloat(1f, 0.35f, infiniteRepeatable(tween(1100), RepeatMode.Reverse), label = "a")
+    Box(Modifier.size(10.dp).alpha(if (live) a else 1f).clip(CircleShape).background(color))
+}
 
 @Composable
-private fun ModemCard(
-    c: ModemConfig, m: ModemState?, hist: List<Point>,
-    onReconnect: () -> Unit, onReboot: () -> Unit, onWeb: () -> Unit,
-) {
-    val cs = MaterialTheme.colorScheme
+private fun Pill(text: String, busy: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(C.Raised).clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (busy) {
+            CircularProgressIndicator(Modifier.size(14.dp), color = C.Text2, strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(text, color = C.Text, fontFamily = Onest, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+private fun fmtMin(m: Long) = if (m < 60) "$m мин" else "${m / 60} ч ${m % 60} мин"
+
+private fun fmtSpeed(v: Double?) = when {
+    v == null -> "—"
+    v < 10 -> "%.1f".format(Locale.US, v)
+    else -> "%.0f".format(Locale.US, v)
+}
+
+// ---------------------------------------------------------------- modem card
+
+@Composable
+private fun ModemCard(c: ModemConfig, m: ModemState?, hist: List<Point>, onReconnect: () -> Unit, onReboot: () -> Unit) {
     var menu by remember { mutableStateOf(false) }
     val live = m != null && m.ok && m.connected
+    val q = if (live) m!!.quality else 0
     val tone = when {
-        !live -> BadTone
-        m!!.quality >= 3 -> GoodTone
-        m.quality == 2 -> WarnTone
-        else -> BadTone
+        !live -> C.Red
+        q >= 3 -> C.Green
+        q == 2 -> C.Amber
+        else -> C.Red
     }
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(cs.surfaceContainer).padding(18.dp)) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.Surface).padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 18.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(c.name, style = MaterialTheme.typography.titleMedium, color = cs.onSurface)
+                Text(c.name, color = C.Text, fontFamily = Onest, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                 Text(
                     when {
                         m == null -> "Ожидание"
                         !m.ok -> "Не отвечает"
                         !m.connected -> "Нет сети"
-                        else -> listOf(m.net, m.band.takeIf { it.isNotEmpty() }?.let { "B$it" }, m.qualityWord)
-                            .filter { !it.isNullOrEmpty() }.joinToString(" · ")
+                        else -> listOf(m.net, m.band.takeIf { it.isNotEmpty() }?.let { "B$it" }).filterNotNull().joinToString(" · ")
                     },
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (live) tone.fg else cs.onSurfaceVariant,
+                    color = if (live) C.Text2 else C.Red, style = Num.copy(fontSize = 14.sp),
                 )
             }
-            Bars(if (live) m!!.quality else 0, tone.fg, cs.surfaceContainerHighest)
+            Bars(q, tone)
             Box {
                 IconButton(onClick = { menu = true }) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "Действия", tint = cs.onSurfaceVariant)
+                    Icon(Icons.Filled.MoreVert, contentDescription = "Действия", tint = C.Text3)
                 }
-                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }, containerColor = C.Raised) {
                     DropdownMenuItem(text = { Text("Переподключить") }, onClick = { menu = false; onReconnect() })
-                    DropdownMenuItem(text = { Text("Перезагрузить модем") }, onClick = { menu = false; onReboot() })
-                    DropdownMenuItem(text = { Text("Открыть веб-интерфейс") }, onClick = { menu = false; onWeb() })
+                    DropdownMenuItem(text = { Text("Перезагрузить", color = C.Red) }, onClick = { menu = false; onReboot() })
                 }
             }
         }
         if (live) {
-            Spacer(Modifier.height(16.dp))
-            Row {
-                Value(m!!.rsrp, "RSRP, дБм", RsrpLine, Modifier.weight(1f))
-                Value(m.sinr, "SINR, дБ", SinrLine, Modifier.weight(1f))
-                Column(Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                    Text("↓ %.1f".format(Locale.US, m.dlMbps), color = cs.onSurface, fontSize = 20.sp, fontWeight = FontWeight.Medium)
-                    Text("↑ %.1f Мбит/с".format(Locale.US, m.ulMbps), color = cs.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
-                }
+            Spacer(Modifier.height(14.dp))
+            Row(Modifier.padding(end = 12.dp)) {
+                Metric(m!!.rsrp?.toString() ?: "—", "RSRP", C.Blue, Modifier.weight(1f))
+                Metric(m.sinr?.toString() ?: "—", "SINR", C.Amber, Modifier.weight(1f))
+                Metric(fmtSpeed(m.dlMbps), "↓ Мбит/с", null, Modifier.weight(1f))
             }
             if (hist.size > 2) {
                 Spacer(Modifier.height(14.dp))
-                Spark(hist, cs.outlineVariant)
+                Box(Modifier.padding(end = 12.dp)) { Spark(hist) }
             }
         }
     }
 }
 
 @Composable
-private fun Value(v: Int?, label: String, dot: Color, modifier: Modifier) {
-    val cs = MaterialTheme.colorScheme
+private fun Metric(value: String, label: String, dot: Color?, modifier: Modifier) {
     Column(modifier) {
-        Text(v?.toString() ?: "—", color = cs.onSurface, fontSize = 28.sp, fontWeight = FontWeight.SemiBold)
+        Text(value, color = C.Text, style = Num.copy(fontSize = 26.sp, fontWeight = FontWeight.SemiBold, letterSpacing = (-0.5).sp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(6.dp).clip(CircleShape).background(dot))
-            Spacer(Modifier.width(5.dp))
-            Text(label, color = cs.onSurfaceVariant, style = MaterialTheme.typography.labelMedium)
+            if (dot != null) {
+                Box(Modifier.size(6.dp).clip(CircleShape).background(dot))
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(label, color = C.Text3, fontFamily = Onest, fontSize = 12.sp)
         }
     }
 }
 
 @Composable
-private fun Bars(q: Int, on: Color, off: Color) {
-    Canvas(Modifier.size(width = 30.dp, height = 22.dp)) {
+private fun Bars(q: Int, on: Color) {
+    Canvas(Modifier.size(width = 26.dp, height = 18.dp)) {
         val w = size.width / 4
         for (i in 0 until 4) {
             val h = size.height * (i + 1) / 4
             drawRoundRect(
-                color = if (i < q) on else off,
-                topLeft = Offset(i * w + w * 0.15f, size.height - h),
-                size = Size(w * 0.7f, h),
-                cornerRadius = CornerRadius(3f, 3f),
+                color = if (i < q) on else C.Line,
+                topLeft = Offset(i * w + w * 0.18f, size.height - h),
+                size = Size(w * 0.64f, h),
+                cornerRadius = CornerRadius(4f, 4f),
             )
         }
     }
 }
 
 @Composable
-private fun Spark(h: List<Point>, grid: Color) {
-    Canvas(Modifier.fillMaxWidth().height(56.dp)) {
+private fun Spark(h: List<Point>) {
+    Canvas(Modifier.fillMaxWidth().height(44.dp)) {
         val t0 = h.first().t
         val span = (h.last().t - t0).coerceAtLeast(1)
         fun line(sel: (Point) -> Int?, lo: Float, hi: Float, color: Color) {
@@ -336,59 +445,66 @@ private fun Spark(h: List<Point>, grid: Color) {
                 val y = size.height - (v.toFloat().coerceIn(lo, hi) - lo) / (hi - lo) * size.height
                 if (started) p.lineTo(x, y) else { p.moveTo(x, y); started = true }
             }
-            drawPath(p, color, style = Stroke(width = 5f, cap = StrokeCap.Round))
+            drawPath(p, color, style = Stroke(width = 2.5.dp.toPx(), cap = StrokeCap.Round))
         }
-        drawLine(grid, Offset(0f, size.height), Offset(size.width, size.height), strokeWidth = 2f)
-        line({ it.rsrp }, -125f, -65f, RsrpLine)
-        line({ it.sinr }, -10f, 30f, SinrLine)
+        line({ it.rsrp }, -125f, -65f, C.Blue)
+        line({ it.sinr }, -10f, 30f, C.Amber.copy(alpha = 0.85f))
     }
 }
+
+// ---------------------------------------------------------------- hints and settings
 
 @Composable
 private fun BatteryHint() {
     val ctx = LocalContext.current
-    val cs = MaterialTheme.colorScheme
     var tick by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) { while (true) { delay(3000); tick++ } }
     tick.hashCode()
     val pm = ctx.getSystemService(PowerManager::class.java)
     if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) return
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(cs.surfaceContainer).padding(16.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(C.Surface).padding(start = 18.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            "Разрешите работу в фоне, иначе Android будет усыплять проверку",
-            color = cs.onSurface, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
-        )
-        Spacer(Modifier.width(12.dp))
-        FilledTonalButton(onClick = {
+        Text("Разрешите работу в фоне, иначе Android усыпит проверку", color = C.Text2,
+            style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(10.dp))
+        Pill("Разрешить", busy = false) {
             ctx.startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${ctx.packageName}")))
-        }) { Text("Разрешить") }
+        }
     }
 }
 
 @Composable
 private fun SettingsSheet(running: Boolean, close: () -> Unit) {
     val ctx = LocalContext.current
-    val cs = MaterialTheme.colorScheme
     val cfg = remember { Monitor.config(ctx) }
     var n0 by remember { mutableStateOf(cfg[0].name) }
     var i0 by remember { mutableStateOf(cfg[0].ip) }
     var n1 by remember { mutableStateOf(cfg[1].name) }
     var i1 by remember { mutableStateOf(cfg[1].ip) }
+    var server by remember { mutableStateOf(Monitor.server(ctx)) }
     var interval by remember { mutableStateOf(Monitor.intervalSec(ctx).toString()) }
     Column(
         Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 20.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Мониторинг", style = MaterialTheme.typography.titleMedium, color = cs.onSurface, modifier = Modifier.weight(1f))
-            Switch(checked = running, onCheckedChange = { on ->
-                ctx.getSharedPreferences("pdm", 0).edit().putBoolean("auto", on).apply()
-                if (on) MonitorService.start(ctx) else MonitorService.stop(ctx)
-            })
+            Text("Мониторинг", color = C.Text, fontFamily = Onest, fontSize = 17.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+            Switch(
+                checked = running,
+                onCheckedChange = { on ->
+                    ctx.getSharedPreferences("pdm", 0).edit().putBoolean("auto", on).apply()
+                    if (on) MonitorService.start(ctx) else MonitorService.stop(ctx)
+                },
+                colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Bg),
+            )
         }
+        OutlinedTextField(
+            server, { server = it.trim() }, label = { Text("Сервер проверки") },
+            placeholder = { Text("http://IP:порт/ключ") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            supportingText = { Text("Адрес из установщика на сервере. Без него — проверка по Google и Яндексу, без замера скорости") },
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(n0, { n0 = it }, label = { Text("Модем 1") }, singleLine = true, modifier = Modifier.weight(1f))
             OutlinedTextField(i0, { i0 = it }, label = { Text("Адрес") }, singleLine = true, modifier = Modifier.weight(1f))
@@ -399,13 +515,18 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
         }
         OutlinedTextField(
             interval, { interval = it.filter(Char::isDigit).take(3) },
-            label = { Text("Проверка, раз в N секунд") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            label = { Text("Проверка раз в, секунд") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
         )
-        Button(onClick = {
-            Monitor.save(ctx, listOf(ModemConfig(n0, i0), ModemConfig(n1, i1)), interval.toIntOrNull() ?: 10)
-            Monitor.message.value = "Сохранено"
-            if (running) MonitorService.start(ctx)
-            close()
-        }, modifier = Modifier.fillMaxWidth()) { Text("Сохранить") }
+        Button(
+            onClick = {
+                Monitor.save(ctx, listOf(ModemConfig(n0, i0), ModemConfig(n1, i1)), interval.toIntOrNull() ?: 10, server)
+                Monitor.message.value = "Сохранено"
+                if (running) MonitorService.start(ctx)
+                close()
+            },
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+            shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = C.Text, contentColor = C.Bg),
+        ) { Text("Сохранить", fontFamily = Onest, fontSize = 16.sp, fontWeight = FontWeight.SemiBold) }
     }
 }

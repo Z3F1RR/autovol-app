@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# Installs pdm-probe: a tiny standalone HTTP service for the train modem app (real data-transfer
+# check + speed test). Does NOT touch Xray, nginx, the bot or existing ports. Safe to re-run:
+# keeps the same token and port, so the address in the app stays valid.
+set -Eeuo pipefail
+
+NAME=pdm-probe
+TS=$(date +%Y%m%d-%H%M%S)
+BK=/root/backups/$NAME-$TS
+DIR=/opt/pdm-probe
+UNIT=/etc/systemd/system/pdm-probe.service
+ENVF=/etc/pdm-probe.env
+LOG=/var/log/zfr-changes.log
+mkdir -p "$BK"
+
+command -v python3 >/dev/null || { echo "Нет python3 — установка отменена, ничего не изменено"; exit 1; }
+
+# ---------- backup + rollback script
+for f in "$DIR" "$UNIT" "$ENVF"; do
+  if [ -e "$f" ]; then cp -a "$f" "$BK/"; fi
+done
+WAS_ENABLED=$(systemctl is-enabled pdm-probe 2>/dev/null || true)
+WAS_ACTIVE=$(systemctl is-active pdm-probe 2>/dev/null || true)
+cat > "$BK/rollback.sh" <<RB
+#!/usr/bin/env bash
+systemctl stop pdm-probe 2>/dev/null || true
+systemctl disable pdm-probe 2>/dev/null || true
+rm -rf "$DIR" "$UNIT" "$ENVF"
+[ -e "$BK/pdm-probe" ] && cp -a "$BK/pdm-probe" "$DIR"
+[ -e "$BK/pdm-probe.service" ] && cp -a "$BK/pdm-probe.service" "$UNIT"
+[ -e "$BK/pdm-probe.env" ] && cp -a "$BK/pdm-probe.env" "$ENVF"
+systemctl daemon-reload
+[ "$WAS_ENABLED" = "enabled" ] && systemctl enable pdm-probe 2>/dev/null
+[ "$WAS_ACTIVE" = "active" ] && systemctl start pdm-probe 2>/dev/null
+echo "pdm-probe: откат выполнен"
+RB
+chmod +x "$BK/rollback.sh"
+
+fail() {
+  echo "ОШИБКА в строке $1 — откатываю изменения"
+  bash "$BK/rollback.sh" || true
+  echo "$(date -Is) $NAME FAIL line $1 backup=$BK" >> "$LOG"
+  exit 1
+}
+trap 'fail $LINENO' ERR
+
+# ---------- token and port: keep existing ones on re-run
+TOKEN=""; PORT=""
+if [ -f "$ENVF" ]; then
+  TOKEN=$(sed -n 's/^PDM_TOKEN=//p' "$ENVF")
+  PORT=$(sed -n 's/^PDM_PORT=//p' "$ENVF")
+fi
+[ -n "$TOKEN" ] || TOKEN=$(head -c 18 /dev/urandom | base64 | tr '+/' 'xy' | tr -d '=')
+if [ -z "$PORT" ]; then
+  for p in 8093 8094 18093 28093 38093; do
+    if ! ss -Hltn "sport = :$p" | grep -q .; then PORT=$p; break; fi
+  done
+fi
+[ -n "$PORT" ] || { echo "Нет свободного порта из списка"; false; }
+
+# ---------- files
+mkdir -p "$DIR"
+cat > "$DIR/pdm_probe.py" <<'PYEOF'
+@@SERVER_PY@@
+PYEOF
+python3 -m py_compile "$DIR/pdm_probe.py"
+rm -rf "$DIR/__pycache__"
+
+umask 077
+printf 'PDM_TOKEN=%s\nPDM_PORT=%s\n' "$TOKEN" "$PORT" > "$ENVF"
+umask 022
+
+cat > "$UNIT" <<UEOF
+[Unit]
+Description=PDM probe (train internet check + speed test)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=$ENVF
+ExecStart=/usr/bin/python3 $DIR/pdm_probe.py
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+MemoryMax=96M
+CPUQuota=50%
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UEOF
+
+# ---------- firewall: only if ufw is active, only our port
+if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+  if ! ufw status | grep -qE "^$PORT/tcp +ALLOW"; then
+    ufw allow "$PORT/tcp" comment pdm-probe >/dev/null
+    echo "ufw delete allow $PORT/tcp >/dev/null 2>&1 || true" >> "$BK/rollback.sh"
+  fi
+fi
+
+# ---------- start + health check
+systemctl daemon-reload
+systemctl enable pdm-probe >/dev/null 2>&1
+systemctl restart pdm-probe
+OK=""
+for i in $(seq 1 10); do
+  sleep 2
+  if systemctl is-active -q pdm-probe && curl -fsS -m 3 "http://127.0.0.1:$PORT/$TOKEN/ping?n=hc$i" 2>/dev/null | grep -q "pdm-ok hc$i"; then
+    OK=1; break
+  fi
+done
+[ -n "$OK" ] || { echo "Сервис не ответил за 20 секунд"; false; }
+# echo check: hash of an uploaded body must come back
+head -c 1024 /dev/urandom > "$BK/echo.bin"
+curl -fsS -m 5 --data-binary @"$BK/echo.bin" -H 'Content-Type: application/octet-stream' -o "$BK/echo.out" "http://127.0.0.1:$PORT/$TOKEN/echo"
+WANT=$(sha256sum "$BK/echo.bin" | awk '{print $1}')
+grep -aq "^pdm-ok $WANT" "$BK/echo.out" || { echo "Проверка echo не прошла"; false; }
+rm -f "$BK/echo.bin" "$BK/echo.out"
+trap - ERR
+
+IP=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')
+URL="http://$IP:$PORT/$TOKEN"
+echo "$(date -Is) $NAME OK port=$PORT backup=$BK" >> "$LOG"
+echo
+echo "pdm-probe работает. Xray, nginx и бот не тронуты."
+echo "Адрес для приложения (Настройки → Сервер проверки):"
+echo
+echo "$URL"
+echo
+echo "Бэкап: $BK"
+echo "Откат: bash $BK/rollback.sh"
