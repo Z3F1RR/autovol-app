@@ -178,6 +178,37 @@ object Monitor {
         e.commit()
     }
 
+    /**
+     * Networks Android won't let this app use directly. With a VPN set to «Блокировать соединения без VPN»
+     * (lockdown), a request bound to the bare Wi-Fi or mobile network silently goes nowhere: then modems,
+     * the router and the internet check all look dead. Filled from NetworkCallback.onBlockedStatusChanged.
+     */
+    val blocked = java.util.concurrent.ConcurrentHashMap<Network, Boolean>()
+
+    @Suppress("DEPRECATION")
+    fun isBlocked(ctx: Context, raw: Network): Boolean {
+        if (blocked[raw] == true) return true
+        val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return false
+        return try { cm.getNetworkInfo(raw)?.detailedState == android.net.NetworkInfo.DetailedState.BLOCKED } catch (_: Exception) { false }
+    }
+
+    /** The phone's VPN network, if one is up. */
+    @Suppress("DEPRECATION")
+    fun vpnNetwork(ctx: Context): Network? {
+        val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return null
+        val vpn = { n: Network? -> n != null && cm.getNetworkCapabilities(n)?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true }
+        return cm.activeNetwork.takeIf(vpn) ?: cm.allNetworks.firstOrNull(vpn)
+    }
+
+    /**
+     * What to send requests through for the link [raw]: the link itself, or — when Android blocks it for us
+     * (lockdown VPN) — the VPN on top of it. The VPN app sends local addresses (modems, router) straight to the LAN.
+     */
+    fun via(ctx: Context, raw: Network): Network = if (isBlocked(ctx, raw)) vpnNetwork(ctx) ?: raw else raw
+
+    /** True when requests for [raw] go through the VPN because the bare link is blocked for us. */
+    fun viaVpn(ctx: Context, raw: Network): Boolean = isBlocked(ctx, raw) && vpnNetwork(ctx) != null
+
     /** Default gateway of a network (the router), e.g. 192.168.1.1. */
     fun gateway(ctx: Context, network: Network): String? {
         val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return null
@@ -191,7 +222,7 @@ object Monitor {
         val n = wifiNetwork(ctx) ?: return false
         val gw = gateway(ctx, n) ?: return false
         return try {
-            val c = open(n, "http://$gw/auth", connect = 2500, read = 3000)
+            val c = open(via(ctx, n), "http://$gw/auth", connect = 2500, read = 3000)
             try { c.responseCode > 0 } finally { c.disconnect() }
         } catch (e: Exception) {
             false
@@ -212,16 +243,17 @@ object Monitor {
         val n = wifiNetwork(ctx) ?: return Place.NO_WIFI to null
         val now = System.currentTimeMillis()
         if (n == placeNet && now - placeAt < (if (placeOk) 120_000 else 60_000)) return (if (placeOk) Place.TRAIN else Place.FOREIGN) to n
+        val through = via(ctx, n)
         val keenetic = gateway(ctx, n)?.let { gw ->
             try {
-                val c = open(n, "http://$gw/auth", connect = 2500, read = 3000)
+                val c = open(through, "http://$gw/auth", connect = 2500, read = 3000)
                 try { c.responseCode == 401 && c.getHeaderField("X-NDM-Realm") != null } finally { c.disconnect() }
             } catch (e: Exception) {
                 false
             }
         } ?: false
         val ok = keenetic || config(ctx).any { m ->
-            try { HiLink(m.ip, n).read().ok } catch (e: Exception) { false }
+            try { HiLink(m.ip, through).read().ok } catch (e: Exception) { false }
         }
         // a "no" right after connecting may be wrong (gateway not known yet): onLinkPropertiesChanged resets the cache
         placeNet = if (gateway(ctx, n) != null || ok) n else null

@@ -143,7 +143,12 @@ class MonitorService : Service() {
         val cm = getSystemService(ConnectivityManager::class.java) ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) { Monitor.resetPlace(); wake() }
+            override fun onBlockedStatusChanged(network: Network, blocked: Boolean) {
+                // lockdown VPN: the bare link is closed for us, requests have to go through the VPN
+                if (Monitor.blocked.put(network, blocked) != blocked) { Monitor.resetPlace(); wake() }
+            }
             override fun onLost(network: Network) {
+                Monitor.blocked.remove(network)
                 Monitor.resetPlace()
                 synchronized(ssids) { ssids.remove(network) }
                 wake()
@@ -196,7 +201,7 @@ class MonitorService : Service() {
     private fun resolve(): Ctx? {
         val (place, wifi) = Monitor.place(this)
         lastPlace = place
-        val c = when {
+        val c0 = when {
             place == Place.TRAIN && wifi != null -> Ctx(Where.TRAIN, wifi, "Wi-Fi вагона")
             place == Place.FOREIGN && wifi != null && Monitor.otherWifi(this) ->
                 Ctx(Where.WIFI, wifi, ssid(wifi)?.let { "Wi-Fi «$it»" } ?: "Другой Wi-Fi")
@@ -206,6 +211,8 @@ class MonitorService : Service() {
             }
             else -> null
         }
+        // VPN with «Блокировать соединения без VPN»: the bare link is closed for us, everything goes through the VPN
+        val c = c0?.let { if (Monitor.viaVpn(this, it.network)) it.copy(label = it.label + " · через VPN") else it }
         val prev = current
         val now = System.currentTimeMillis()
         if (prev?.where != c?.where || prev?.network != c?.network) {
@@ -261,7 +268,7 @@ class MonitorService : Service() {
         }
         val states = Monitor.config(this).map { m ->
             try {
-                HiLink(m.ip, c.network).read()
+                HiLink(m.ip, Monitor.via(this, c.network)).read()
             } catch (e: Exception) {
                 ModemState(ok = false, error = e.javaClass.simpleName)
             }
@@ -282,7 +289,7 @@ class MonitorService : Service() {
 
     private fun checkNet(): Long {
         val c = resolve() ?: return pausedWait()
-        val (raw, ms) = Monitor.check(c.network, Monitor.server(this))
+        val (raw, ms) = Monitor.check(Monitor.via(this, c.network), Monitor.server(this))
         // the link changed while we were checking: drop this result
         if (current?.network != c.network) return 1000L
         val now = System.currentTimeMillis()
@@ -370,7 +377,7 @@ class MonitorService : Service() {
 
     private fun speedTest() {
         Monitor.post { Monitor.speedRunning.value = true }
-        val s = Monitor.speedTest(current?.network, Monitor.server(this))
+        val s = Monitor.speedTest(current?.network?.let { Monitor.via(this, it) }, Monitor.server(this))
         if (s.error == null) Monitor.saveSpeed(this, s)
         Monitor.post {
             Monitor.speedRunning.value = false
@@ -381,7 +388,7 @@ class MonitorService : Service() {
     private fun modemAction(i: Int, reboot: Boolean) {
         val cfg = Monitor.config(this).getOrNull(i) ?: return
         val msg = try {
-            val h = HiLink(cfg.ip, Monitor.wifiNetwork(this))
+            val h = HiLink(cfg.ip, Monitor.wifiNetwork(this)?.let { Monitor.via(this, it) })
             if (reboot) {
                 h.reboot()
                 "${cfg.name} перезагружается, около минуты"
