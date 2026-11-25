@@ -46,7 +46,12 @@ data class Snapshot(
     val label: String = "",
     /** The phone's own signal on another Wi-Fi or mobile data. */
     val local: Local? = null,
+    /** Why the last check failed, step by step (shown under "no internet"). */
+    val why: String = "",
 )
+
+/** Result of one probe: time in ms, or the reason it failed. */
+class Probe(val ms: Int?, val err: String = "")
 
 /** One point of history: time, RSRP, SINR. */
 data class Point(val t: Long, val rsrp: Int?, val sinr: Int?)
@@ -63,6 +68,8 @@ object Monitor {
     val speedRunning = mutableStateOf(false)
     val ups = mutableStateOf<Ups?>(null)
     val localHistory = mutableStateOf<List<Point>>(emptyList())
+    val diag = mutableStateOf<String?>(null)
+    val diagRunning = mutableStateOf(false)
 
     private val main = Handler(Looper.getMainLooper())
     private val rnd = SecureRandom()
@@ -133,14 +140,24 @@ object Monitor {
      * mobile data, and the modems' 192.168.x.1 addresses would be unreachable — so we bind to Wi-Fi.
      */
     @Suppress("DEPRECATION")
-    fun wifiNetwork(ctx: Context): Network? {
-        val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return null
-        return cm.allNetworks.firstOrNull { n ->
-            val c = cm.getNetworkCapabilities(n)
-            // a VPN over Wi-Fi also reports TRANSPORT_WIFI: skip it, we need the real link
-            c != null && c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) && !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-        }
+    fun wifiNetworks(ctx: Context): List<Network> {
+        val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return emptyList()
+        // a VPN over Wi-Fi also reports TRANSPORT_WIFI: skip it, we need the real link. Phones with
+        // dual Wi-Fi may have two: the one with INTERNET and a gateway goes first.
+        return cm.allNetworks.mapNotNull { n ->
+            val c = cm.getNetworkCapabilities(n) ?: return@mapNotNull null
+            if (!c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
+            var score = 0
+            if (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) score += 4
+            if (gateway(ctx, n) != null) score += 2
+            if (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)) score += 1
+            n to score
+        }.sortedByDescending { it.second }.map { it.first }
     }
+
+    /** The router's Wi-Fi: the train network if known, otherwise the best Wi-Fi. */
+    fun wifiNetwork(ctx: Context): Network? =
+        synchronized(this) { placeNet?.takeIf { placeOk } }?.takeIf { it in wifiNetworks(ctx) } ?: wifiNetworks(ctx).firstOrNull()
 
     /** Mobile data network, if Android keeps one up. Requests bound to it bypass Wi-Fi and the phone's VPN. */
     @Suppress("DEPRECATION")
@@ -229,6 +246,28 @@ object Monitor {
         }
     }
 
+    /** Keenetic answers GET /auth with 401 and an X-NDM-Realm header. */
+    private fun keenetic(n: Network?, gw: String): Probe {
+        val start = System.nanoTime()
+        return try {
+            val c = open(n, "http://$gw/auth", connect = 2500, read = 3000)
+            try {
+                val code = c.responseCode
+                val realm = c.getHeaderField("X-NDM-Realm")
+                if (code == 401 && realm != null) Probe(ms(start)) else Probe(null, "HTTP $code, X-NDM-Realm=${realm ?: "нет"}")
+            } finally { c.disconnect() }
+        } catch (e: Exception) {
+            Probe(null, short(e))
+        }
+    }
+
+    private fun isTrain(ctx: Context, n: Network): Boolean {
+        val gw = gateway(ctx, n)
+        val through = via(ctx, n)
+        if (gw != null && keenetic(through, gw).ms != null) return true
+        return config(ctx).any { m -> try { HiLink(m.ip, through).read().ok } catch (e: Exception) { false } }
+    }
+
     private var placeNet: Network? = null
     private var placeOk = false
     private var placeAt = 0L
@@ -240,26 +279,19 @@ object Monitor {
      */
     @Synchronized
     fun place(ctx: Context): Pair<Place, Network?> {
-        val n = wifiNetwork(ctx) ?: return Place.NO_WIFI to null
+        val nets = wifiNetworks(ctx)
+        if (nets.isEmpty()) return Place.NO_WIFI to null
         val now = System.currentTimeMillis()
-        if (n == placeNet && now - placeAt < (if (placeOk) 120_000 else 60_000)) return (if (placeOk) Place.TRAIN else Place.FOREIGN) to n
-        val through = via(ctx, n)
-        val keenetic = gateway(ctx, n)?.let { gw ->
-            try {
-                val c = open(through, "http://$gw/auth", connect = 2500, read = 3000)
-                try { c.responseCode == 401 && c.getHeaderField("X-NDM-Realm") != null } finally { c.disconnect() }
-            } catch (e: Exception) {
-                false
-            }
-        } ?: false
-        val ok = keenetic || config(ctx).any { m ->
-            try { HiLink(m.ip, through).read().ok } catch (e: Exception) { false }
+        val cached = placeNet
+        if (cached != null && cached in nets && now - placeAt < (if (placeOk) 120_000 else 60_000)) {
+            return if (placeOk) Place.TRAIN to cached else Place.FOREIGN to nets.first()
         }
+        val train = nets.firstOrNull { isTrain(ctx, it) }
         // a "no" right after connecting may be wrong (gateway not known yet): onLinkPropertiesChanged resets the cache
-        placeNet = if (gateway(ctx, n) != null || ok) n else null
-        placeOk = ok
+        placeNet = train ?: nets.first().takeIf { gateway(ctx, it) != null }
+        placeOk = train != null
         placeAt = now
-        return (if (ok) Place.TRAIN else Place.FOREIGN) to n
+        return if (train != null) Place.TRAIN to train else Place.FOREIGN to nets.first()
     }
 
     /** Forget the cached answer: called when Wi-Fi connects or disconnects. */
@@ -274,12 +306,32 @@ object Monitor {
      * 2. Foreign HTTPS (valid certificate required): full internet even if the own server is down.
      * 3. Russian whitelisted HTTPS sites only: whitelist mode.
      */
-    fun check(network: Network?, server: String): Pair<Net, Int?> {
-        if (network == null) return Net.NO_WIFI to null
-        if (server.isNotEmpty()) echo(network, server)?.let { return Net.FULL to it }
-        for (url in FULL_URLS) https(network, url, expect204 = true)?.let { return Net.FULL to it }
-        for (url in WHITELIST_URLS) https(network, url, expect204 = false)?.let { return Net.WHITELIST to it }
-        return Net.NONE to null
+    fun check(network: Network?, server: String): Triple<Net, Int?, String> {
+        if (network == null) return Triple(Net.NO_WIFI, null, "")
+        val errs = ArrayList<String>()
+        if (server.isNotEmpty()) {
+            val p = echo(network, server)
+            if (p.ms != null) return Triple(Net.FULL, p.ms, "")
+            errs += "сервер: ${p.err}"
+        }
+        for (url in FULL_URLS) {
+            val p = https(network, url, expect204 = true)
+            if (p.ms != null) return Triple(Net.FULL, p.ms, "")
+            errs += "${host(url)}: ${p.err}"
+        }
+        for (url in WHITELIST_URLS) {
+            val p = https(network, url, expect204 = false)
+            if (p.ms != null) return Triple(Net.WHITELIST, p.ms, errs.joinToString("\n"))
+            errs += "${host(url)}: ${p.err}"
+        }
+        return Triple(Net.NONE, null, errs.joinToString("\n"))
+    }
+
+    private fun host(url: String) = URL(url).host.removePrefix("www.")
+
+    fun short(e: Throwable): String {
+        val m = (e.message ?: "").replace(Regex("https?://[^ ]+"), "").trim()
+        return e.javaClass.simpleName + if (m.isNotEmpty()) ": " + m.take(80) else ""
     }
 
     private val FULL_URLS = listOf(
@@ -296,8 +348,9 @@ object Monitor {
     private fun sha256(b: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(b).joinToString("") { "%02x".format(it) }
 
-    private fun open(network: Network, url: String, connect: Int = 3500, read: Int = 5000): HttpURLConnection =
-        (network.openConnection(URL(url)) as HttpURLConnection).apply {
+    /** [network] null = the default route, like any other app (through the phone's VPN if one is on). */
+    private fun open(network: Network?, url: String, connect: Int = 3500, read: Int = 5000): HttpURLConnection =
+        ((network?.openConnection(URL(url)) ?: URL(url).openConnection()) as HttpURLConnection).apply {
             connectTimeout = connect
             readTimeout = read
             useCaches = false
@@ -306,42 +359,107 @@ object Monitor {
         }
 
     /** Round trip of real data through the own server, in ms, or null. */
-    private fun echo(network: Network, base: String): Int? {
+    private fun echo(network: Network?, base: String): Probe {
         val body = ByteArray(1024).also { rnd.nextBytes(it) }
         val head = "pdm-ok ${sha256(body)}\n".toByteArray()
         val start = System.nanoTime()
-        val c = try { open(network, "$base/echo") } catch (e: Exception) { return null }
+        val c = try { open(network, "$base/echo") } catch (e: Exception) { return Probe(null, short(e)) }
         return try {
             c.requestMethod = "POST"
             c.doOutput = true
             c.setFixedLengthStreamingMode(body.size)
             c.setRequestProperty("Content-Type", "application/octet-stream")
             c.outputStream.use { it.write(body) }
-            if (c.responseCode != 200) { c.disconnect(); return null }
+            val code = c.responseCode
+            if (code != 200) { c.disconnect(); return Probe(null, "HTTP $code") }
             val data = c.inputStream.use { it.readBytes() }
             val ok = data.size >= head.size + 2048 && data.copyOfRange(0, head.size).contentEquals(head)
-            if (ok) ms(start) else null
+            if (ok) Probe(ms(start)) else Probe(null, "ответ не от pdm-probe (${data.size} байт)")
         } catch (e: Exception) {
             c.disconnect()
-            null
+            Probe(null, short(e))
         }
     }
 
     /** HEAD over HTTPS: the TLS certificate proves we reached the real site. Time in ms, or null. */
-    private fun https(network: Network, url: String, expect204: Boolean): Int? {
+    private fun https(network: Network?, url: String, expect204: Boolean): Probe {
         val start = System.nanoTime()
-        val c = try { open(network, url, read = 4000) } catch (e: Exception) { return null }
+        val c = try { open(network, url, read = 4000) } catch (e: Exception) { return Probe(null, short(e)) }
         return try {
             c.requestMethod = if (expect204) "GET" else "HEAD"
             val code = c.responseCode
             try { (if (code < 400) c.inputStream else c.errorStream)?.close() } catch (_: Exception) {}
             // any HTTP answer behind a valid certificate means the site is really reachable
             val ok = if (expect204) code == 204 else code in 100..599
-            if (ok) ms(start) else null
+            if (ok) Probe(ms(start)) else Probe(null, "HTTP $code")
         } catch (e: Exception) {
             c.disconnect()
-            null
+            Probe(null, short(e))
         }
+    }
+
+    /**
+     * Step-by-step report for troubleshooting: every network Android has, the router and modem checks,
+     * the internet checks bound to each network and through the default route. The server key is masked.
+     */
+    @Suppress("DEPRECATION")
+    fun diagnose(ctx: Context): String {
+        val cm = ctx.getSystemService(ConnectivityManager::class.java)!!
+        val server = server(ctx)
+        val out = StringBuilder()
+        fun line(s: String) { out.append(s).append('\n') }
+        fun p(label: String, r: Probe) = line("  $label → " + if (r.ms != null) "OK ${r.ms} мс" else r.err)
+        line("ПДМ-статус ${java.text.SimpleDateFormat("dd.MM HH:mm:ss", java.util.Locale.US).format(java.util.Date())}, " +
+            "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL}, Android ${android.os.Build.VERSION.RELEASE}")
+        line("Сервер проверки: " + if (server.isEmpty()) "не задан" else server.replace(Regex("/[^/]{8,}$"), "/***"))
+        val def = cm.activeNetwork
+        line("Сети:")
+        for (n in cm.allNetworks) {
+            val c = cm.getNetworkCapabilities(n)
+            val t = listOfNotNull(
+                "Wi-Fi".takeIf { c?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true },
+                "моб".takeIf { c?.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) == true },
+                "VPN".takeIf { c?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) == true },
+            ).joinToString("+")
+            val caps = listOfNotNull(
+                "INTERNET".takeIf { c?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true },
+                "VALIDATED".takeIf { c?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true },
+                "RESTRICTED".takeIf { c != null && !c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED) },
+            ).joinToString(" ")
+            val lp = cm.getLinkProperties(n)
+            line("  #$n $t $caps · ${lp?.interfaceName ?: "?"} · шлюз ${gateway(ctx, n) ?: "нет"}" +
+                (if (isBlocked(ctx, n)) " · ЗАБЛОКИРОВАНА для приложения" else "") + if (n == def) " · по умолчанию" else "")
+        }
+        val (place, pn) = place(ctx)
+        line("Определено: $place" + (pn?.let { " (#$it)" } ?: ""))
+        fun internet(n: Network?) {
+            if (server.isNotEmpty()) p("сервер", echo(n, server))
+            for (u in FULL_URLS) p(host(u), https(n, u, true))
+            for (u in WHITELIST_URLS) p(host(u), https(n, u, false))
+        }
+        for (raw in wifiNetworks(ctx)) {
+            val n = via(ctx, raw)
+            line("Wi-Fi #$raw" + if (n != raw) " (через VPN #$n, прямой доступ закрыт):" else ":")
+            val gw = gateway(ctx, n)
+            if (gw != null) p("Keenetic $gw/auth", keenetic(n, gw)) else line("  шлюза нет")
+            for (m in config(ctx)) {
+                val r = try { if (HiLink(m.ip, n).read().ok) Probe(0) else Probe(null, "не ok") } catch (e: Exception) { Probe(null, short(e)) }
+                p("модем ${m.name} ${m.ip}", r)
+            }
+            internet(n)
+        }
+        cellNetwork(ctx)?.let { raw ->
+            val n = via(ctx, raw)
+            line("Мобильная #$raw" + if (n != raw) " (через VPN #$n):" else ":")
+            internet(n)
+        }
+        line("Без привязки к сети (как обычные приложения, через VPN если включён):")
+        config(ctx).firstOrNull()?.let { m ->
+            p("модем ${m.name} ${m.ip}", try { if (HiLink(m.ip, null).read().ok) Probe(0) else Probe(null, "не ok") } catch (e: Exception) { Probe(null, short(e)) })
+        }
+        internet(null)
+        if (rootSsid(ctx)) line("SSID через root: ${Root.ssid() ?: "не получен"}")
+        return out.toString()
     }
 
     /** Download for up to 8 s, then upload for up to 6 s, through the own server. */

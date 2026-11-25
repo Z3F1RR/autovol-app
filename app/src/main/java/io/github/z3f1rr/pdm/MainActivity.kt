@@ -29,6 +29,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -228,6 +229,8 @@ private fun Screen() {
             UpsCard(now)
 
             BatteryHint()
+
+            DiagRow()
         }
     }
 
@@ -298,6 +301,10 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
             Spacer(Modifier.height(4.dp))
             Text(sub, color = C.Text2, style = Num.copy(fontSize = 15.sp))
         }
+        if (running && s != null && s.why.isNotEmpty()) {
+            Spacer(Modifier.height(8.dp))
+            Text(s.why, color = C.Text3, style = Num.copy(fontSize = 12.sp, lineHeight = 16.sp))
+        }
 
         if (running && server.isNotEmpty() && s?.where != null) {
             Spacer(Modifier.height(18.dp))
@@ -317,8 +324,7 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
                     )
                 }
                 Pill(
-                    // on mobile data the test costs about 40 MB of traffic
-                    text = if (measuring) "Замер…" else if (s.where == Where.MOBILE) "Замерить · 40 МБ" else "Замерить",
+                    text = if (measuring) "Замер…" else "Замерить",
                     busy = measuring,
                     onClick = { if (!measuring) MonitorService.start(ctx, MonitorService.ACTION_SPEED) },
                 )
@@ -509,6 +515,51 @@ private fun LocalCard(l: Local?, where: Where, hist: List<Point>) {
     }
 }
 
+// ---------------------------------------------------------------- diagnostics
+
+@Composable
+private fun DiagRow() {
+    val ctx = LocalContext.current
+    val busy = Monitor.diagRunning.value
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(C.Surface).padding(start = 18.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Подробная проверка сетей, роутера и модемов", color = C.Text2,
+            style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+        Spacer(Modifier.width(10.dp))
+        Pill(if (busy) "Проверяю…" else "Диагностика", busy = busy) {
+            if (busy) return@Pill
+            Monitor.diagRunning.value = true
+            val app = ctx.applicationContext
+            Thread {
+                val r = try { Monitor.diagnose(app) } catch (e: Throwable) { "Диагностика упала: " + Monitor.short(e) }
+                Monitor.post { Monitor.diag.value = r; Monitor.diagRunning.value = false }
+            }.apply { isDaemon = true }.start()
+        }
+    }
+    Monitor.diag.value?.let { text ->
+        AlertDialog(
+            onDismissRequest = { Monitor.diag.value = null },
+            containerColor = C.Raised,
+            title = { Text("Диагностика") },
+            text = {
+                Text(text, color = C.Text2, style = Num.copy(fontSize = 12.sp, lineHeight = 16.sp),
+                    modifier = Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()))
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val cb = ctx.getSystemService(android.content.ClipboardManager::class.java)
+                    cb.setPrimaryClip(android.content.ClipData.newPlainText("ПДМ диагностика", text))
+                    Monitor.message.value = "Скопировано"
+                    Monitor.diag.value = null
+                }) { Text("Копировать") }
+            },
+            dismissButton = { TextButton(onClick = { Monitor.diag.value = null }) { Text("Закрыть", color = C.Text2) } },
+        )
+    }
+}
+
 // ---------------------------------------------------------------- UPS test (temporary)
 
 @Composable
@@ -622,7 +673,7 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
             )
         }
         FlagRow("Другие Wi-Fi", "Проверять интернет в любой сети, не только в вагоне", "other_wifi", Monitor.otherWifi(ctx), running)
-        FlagRow("Мобильный интернет", "Проверять, когда Wi-Fi нет. Около 15 МБ в сутки", "mobile", Monitor.mobile(ctx), running)
+        FlagRow("Мобильный интернет", "Проверять, когда Wi-Fi нет", "mobile", Monitor.mobile(ctx), running)
         FlagRow("Имя Wi-Fi через root", "KernelSU спросит разрешение один раз", "root_ssid", Monitor.rootSsid(ctx), running)
         OutlinedTextField(
             server, { server = it.trim() }, label = { Text("Сервер проверки") },

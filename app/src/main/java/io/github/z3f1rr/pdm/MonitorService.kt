@@ -51,6 +51,7 @@ class MonitorService : Service() {
     // Internet state: a change is accepted only after two checks in a row agree.
     @Volatile private var confirmed: Net? = null
     @Volatile private var latency: Int? = null
+    @Volatile private var why = ""
     @Volatile private var since = 0L
     private var pending: Net? = null
     @Volatile private var recheckSoon = false
@@ -216,7 +217,7 @@ class MonitorService : Service() {
         val prev = current
         val now = System.currentTimeMillis()
         if (prev?.where != c?.where || prev?.network != c?.network) {
-            confirmed = null; pending = null; latency = null; recheckSoon = false; since = now
+            confirmed = null; pending = null; latency = null; why = ""; recheckSoon = false; since = now
             modems = emptyList(); local = null
             synchronized(history) { history.forEach { it.clear() }; localHist.clear() }
             Monitor.post { Monitor.history.value = emptyList(); Monitor.localHistory.value = emptyList() }
@@ -244,11 +245,8 @@ class MonitorService : Service() {
         return v
     }
 
-    private fun interval(c: Ctx): Long {
-        val sec = Monitor.intervalSec(this)
-        // off the train: no point checking a phone's own link more often than every 30 s, it costs traffic
-        return (if (c.where == Where.TRAIN) sec else maxOf(sec, 30)) * 1000L
-    }
+    @Suppress("UNUSED_PARAMETER")
+    private fun interval(c: Ctx): Long = Monitor.intervalSec(this) * 1000L
 
     private fun pollModems(): Long {
         val c = resolve() ?: return pausedWait()
@@ -289,7 +287,7 @@ class MonitorService : Service() {
 
     private fun checkNet(): Long {
         val c = resolve() ?: return pausedWait()
-        val (raw, ms) = Monitor.check(Monitor.via(this, c.network), Monitor.server(this))
+        val (raw, ms, reasons) = Monitor.check(Monitor.via(this, c.network), Monitor.server(this))
         // the link changed while we were checking: drop this result
         if (current?.network != c.network) return 1000L
         val now = System.currentTimeMillis()
@@ -306,7 +304,7 @@ class MonitorService : Service() {
             else -> pending = raw
         }
         recheckSoon = pending != null
-        if (confirmed == raw) latency = ms
+        if (confirmed == raw) { latency = ms; why = reasons }
         publish()
         val cur = confirmed
         if (changed && cur != null) {
@@ -326,6 +324,7 @@ class MonitorService : Service() {
             modems = if (c?.where == Where.TRAIN) modems else emptyList(),
             net = net, latencyMs = latency, time = System.currentTimeMillis(), since = since,
             where = c?.where, label = c?.label ?: pausedLabel, local = if (c != null && c.where != Where.TRAIN) local else null,
+            why = if (c != null && net == Net.NONE) why else "",
         )
         Monitor.post { Monitor.snapshot.value = snap }
         try {
