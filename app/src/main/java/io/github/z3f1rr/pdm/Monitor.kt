@@ -481,6 +481,10 @@ object Monitor {
         }
         internet(null)
         if (rootSsid(ctx)) line("SSID через root: ${Root.ssid() ?: "не получен"}")
+        Ops.keenetic(ctx)?.let { k ->
+            line("Роутер:")
+            line("  " + try { k.hostSample() } catch (e: Exception) { short(e) })
+        }
         return out.toString()
     }
 

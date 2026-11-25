@@ -1019,11 +1019,14 @@ private fun ClientRow(cl: Client, onClick: () -> Unit) {
         }
         if (cl.active) {
             val d = cl.downMbps ?: 0.0
-            Text(
-                "↓ " + fmtSpeed(cl.downMbps),
-                color = if (d >= 5) C.Amber else C.Text2,
-                style = Num.copy(fontSize = 15.sp, fontWeight = if (d >= 5) FontWeight.SemiBold else FontWeight.Normal),
-            )
+            Column(horizontalAlignment = Alignment.End) {
+                Text(
+                    "↓ " + fmtSpeed(cl.downMbps),
+                    color = if (d >= 5) C.Amber else C.Text,
+                    style = Num.copy(fontSize = 15.sp, fontWeight = if (d >= 5) FontWeight.SemiBold else FontWeight.Normal),
+                )
+                Text("↑ " + fmtSpeed(cl.upMbps), color = C.Text3, style = Num.copy(fontSize = 13.sp))
+            }
         }
     }
 }

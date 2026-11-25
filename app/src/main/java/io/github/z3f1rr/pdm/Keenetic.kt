@@ -181,7 +181,10 @@ class Keenetic(private val gw: String, private val network: Network?, private va
             )
         }
 
-        val (limits, unknownLimit) = try { limits() } catch (e: Exception) { emptyMap<String, Int>() to null }
+        // the running config is large: read limits once a minute, not on every poll
+        val cached = limitsCache
+        val (limits, unknownLimit) = if (cached != null && now - cached.third < 60_000) cached.first to cached.second
+        else try { limits().also { limitsCache = Triple(it.first, it.second, now) } } catch (e: Exception) { emptyMap<String, Int>() to null }
 
         val hs = JSONObject(get("/rci/show/ip/hotspot")).optJSONArray("host") ?: JSONArray()
         val clients = ArrayList<Client>()
@@ -192,8 +195,11 @@ class Keenetic(private val gw: String, private val network: Network?, private va
             val active = truthy(h, "active")
             val registered = truthy(h, "registered")
             // the router's tx to the device is the device's download
-            val down = h.optLong("txbytes", 0)
-            val up = h.optLong("rxbytes", 0)
+            val down = long(h, "txbytes", "tx-bytes", "tx_bytes")
+            val up = long(h, "rxbytes", "rx-bytes", "rx_bytes")
+            // some firmware reports the rate itself (bit/s)
+            val dSpeed = long(h, "txspeed", "tx-speed").takeIf { it > 0 }?.let { it / 1e6 }
+            val uSpeed = long(h, "rxspeed", "rx-speed").takeIf { it > 0 }?.let { it / 1e6 }
             if (!active && down + up == 0L) continue
             val old = prev?.clients?.firstOrNull { it.mac == mac }
             clients += Client(
@@ -202,14 +208,31 @@ class Keenetic(private val gw: String, private val network: Network?, private va
                 ip = h.optString("ip"),
                 active = active,
                 down = down, up = up,
-                downMbps = if (active) rate(down, old?.down) else null,
-                upMbps = if (active) rate(up, old?.up) else null,
+                downMbps = if (active) dSpeed ?: rate(down, old?.down) else null,
+                upMbps = if (active) uSpeed ?: rate(up, old?.up) else null,
                 limitKbps = limits[mac] ?: if (!registered) unknownLimit else null,
                 registered = registered,
             )
         }
         clients.sortWith(compareByDescending<Client> { it.active }.thenByDescending { it.downMbps ?: 0.0 }.thenByDescending { it.down })
         return RouterState(channels.sortedBy { if (it.modem < 0) 99 else it.modem }, clients, now, unknownLimit = unknownLimit)
+    }
+
+    /** For diagnostics: one active device as the router returns it, and what the summary command gives. */
+    fun hostSample(): String {
+        val hs = JSONObject(get("/rci/show/ip/hotspot")).optJSONArray("host") ?: JSONArray()
+        var sample: JSONObject? = null
+        for (i in 0 until hs.length()) {
+            val h = hs.optJSONObject(i) ?: continue
+            if (truthy(h, "active")) { sample = h; break }
+        }
+        val out = StringBuilder("устройств ${hs.length()}; пример: ")
+        out.append(sample?.toString()?.take(700) ?: "нет активных")
+        for (path in listOf("/rci/show/ip/hotspot/summary?attribute=rxbytes&detail=0&count=3", "/rci/show/ip/hotspot?mac=" + (sample?.optString("mac") ?: ""))) {
+            out.append("\n").append(path.substringBefore('?')).append(" → ")
+            out.append(try { get(path).take(400) } catch (e: Exception) { Monitor.short(e) })
+        }
+        return out.toString()
     }
 
     /** Makes [iface] the main channel: priority above every other internet interface. */
@@ -224,6 +247,7 @@ class Keenetic(private val gw: String, private val network: Network?, private va
      * devices. Lines look like "ip traffic-shape host aa:bb:… rate 5000 [asymmetric 5000]".
      */
     fun limits(): Pair<Map<String, Int>, Int?> {
+        limitsCache = null
         val cfg = get("/rci/show/running-config")
         val hosts = Regex("""ip traffic-shape host ([0-9a-fA-F:]{17}) rate (\d+)""").findAll(cfg)
             .associate { it.groupValues[1].lowercase() to it.groupValues[2].toInt() }
@@ -300,6 +324,16 @@ class Keenetic(private val gw: String, private val network: Network?, private va
 
     companion object {
         @Volatile private var cookie = ""
+        @Volatile private var limitsCache: Triple<Map<String, Int>, Int?, Long>? = null
+
+        private fun long(o: JSONObject, vararg keys: String): Long {
+            for (k in keys) {
+                val v = o.opt(k) ?: continue
+                (v as? Number)?.toLong()?.let { return it }
+                v.toString().toLongOrNull()?.let { return it }
+            }
+            return 0
+        }
         private val INTERESTING = Regex(
             "(?i)(Usb|connected|disconnected|link (is )?(up|down)|internet|default gateway|ping.?check|reboot|failover|global)",
         )
