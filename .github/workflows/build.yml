@@ -1,0 +1,56 @@
+name: pdm-app
+
+on:
+  push:
+    branches: ['pdm-app']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Keystore from secrets
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/pdm.jks"
+            echo "KEYSTORE_FILE=$RUNNER_TEMP/pdm.jks" >> "$GITHUB_ENV"
+          fi
+
+      - name: APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: ./gradlew --stacktrace assembleDebug
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pdm-status-${{ github.run_number }}
+          path: app/build/outputs/apk/debug/*.apk
+
+      # Download link for the phone. Not a pre-release (AutoVol releases delete those) and never
+      # marked "latest", so AutoVol's in-app updater keeps seeing its own release.
+      - name: Publish download
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk PDM-status.apk
+          gh release delete pdm-app --yes --cleanup-tag || true
+          gh release create pdm-app PDM-status.apk --latest=false --target "$GITHUB_SHA" \
+            --title "ПДМ-статус (сборка ${{ github.run_number }})" \
+            --notes "Приложение для мониторинга модемов в вагоне. Не относится к AutoVol."
