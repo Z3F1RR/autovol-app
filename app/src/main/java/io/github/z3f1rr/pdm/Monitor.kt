@@ -206,7 +206,28 @@ object Monitor {
     fun isBlocked(ctx: Context, raw: Network): Boolean {
         if (blocked[raw] == true) return true
         val cm = ctx.getSystemService(ConnectivityManager::class.java) ?: return false
-        return try { cm.getNetworkInfo(raw)?.detailedState == android.net.NetworkInfo.DetailedState.BLOCKED } catch (_: Exception) { false }
+        val state = try { cm.getNetworkInfo(raw)?.detailedState == android.net.NetworkInfo.DetailedState.BLOCKED } catch (_: Exception) { false }
+        return state || bindFails(raw)
+    }
+
+    private val bindCache = java.util.concurrent.ConcurrentHashMap<Network, Pair<Boolean, Long>>()
+
+    /**
+     * Can this app pin a socket to [raw]? Not when the app is inside a VPN that doesn't allow bypassing
+     * (most clients): Android answers EPERM, with or without «Блокировать соединения без VPN», and no
+     * callback reports it. Tested on a local UDP socket, no traffic; cached for 20 s.
+     */
+    fun bindFails(raw: Network): Boolean {
+        val now = System.currentTimeMillis()
+        bindCache[raw]?.let { (v, t) -> if (now - t < 20_000) return v }
+        val v = try {
+            java.net.DatagramSocket().use { raw.bindSocket(it) }
+            false
+        } catch (e: Exception) {
+            true
+        }
+        bindCache[raw] = v to now
+        return v
     }
 
     /** The phone's VPN network, if one is up. */
@@ -298,6 +319,7 @@ object Monitor {
     @Synchronized
     fun resetPlace() {
         placeNet = null
+        bindCache.clear()
     }
 
     /**

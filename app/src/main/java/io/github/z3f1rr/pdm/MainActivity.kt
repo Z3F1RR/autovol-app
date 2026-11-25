@@ -205,6 +205,8 @@ private fun Screen() {
 
             Status(snap, running, now)
 
+            if (running && snap != null && snap.label.contains("через VPN")) VpnHint()
+
             if (msg.isNotEmpty()) {
                 Text(
                     msg, color = C.Text, style = MaterialTheme.typography.bodyMedium,
@@ -512,6 +514,25 @@ private fun LocalCard(l: Local?, where: Where, hist: List<Point>) {
                 else Spark(hist, -115f, -55f)
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------- VPN
+
+@Composable
+private fun VpnHint() {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(C.Surface)
+            .border(1.dp, C.Amber.copy(alpha = 0.25f), RoundedCornerShape(20.dp)).padding(18.dp),
+    ) {
+        Text("VPN не пускает приложение в Wi-Fi напрямую", color = C.Amber, fontFamily = Onest, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "Сейчас проверка идёт через VPN и показывает, работает ли VPN, а не сам канал. Добавьте «ПДМ-статус» " +
+                "в исключения VPN-клиента (раздельное туннелирование). Если в настройках Android у VPN включено " +
+                "«Блокировать соединения без VPN» — выключите, иначе исключённое приложение останется без сети.",
+            color = C.Text2, style = MaterialTheme.typography.bodyMedium,
+        )
     }
 }
 
