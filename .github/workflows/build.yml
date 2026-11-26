@@ -59,6 +59,6 @@ jobs:
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk PDM-status.apk
           gh release delete pdm-app --yes --cleanup-tag || true
-          gh release create pdm-app PDM-status.apk --latest=false --target "$GITHUB_SHA" \
+          gh release create pdm-app PDM-status.apk router/pdm-agent-install.sh --latest=false --target "$GITHUB_SHA" \
             --title "ПДМ-статус (сборка ${{ github.run_number }})" \
             --notes "Приложение для мониторинга модемов в вагоне. Не относится к AutoVol."

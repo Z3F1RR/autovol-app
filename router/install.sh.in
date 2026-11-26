@@ -1,0 +1,99 @@
+#!/bin/sh
+# Installs or updates pdm-agent on the Keenetic router (Entware on a USB drive).
+# Safe to re-run: keeps the settings, token and collected statistics; rolls back if the new
+# version does not answer within 20 seconds.
+set -e
+
+DIR=/opt/pdm
+INIT=/opt/etc/init.d/S99pdm-agent
+TS=$(date +%Y%m%d-%H%M%S)
+BK=$DIR/backup-$TS
+PORT=8099
+
+[ -x /opt/bin/python3 ] || { echo "Нет python3. Сначала: opkg update && opkg install python3 ca-certificates"; exit 1; }
+mkdir -p "$DIR/data" "$BK"
+
+# ---------- backup
+[ -f "$DIR/pdm_agent.py" ] && cp -a "$DIR/pdm_agent.py" "$BK/"
+[ -f "$INIT" ] && cp -a "$INIT" "$BK/"
+cat > "$BK/rollback.sh" <<RB
+#!/bin/sh
+$INIT stop 2>/dev/null
+[ -f "$BK/pdm_agent.py" ] && cp -a "$BK/pdm_agent.py" "$DIR/pdm_agent.py"
+[ -f "$BK/S99pdm-agent" ] && cp -a "$BK/S99pdm-agent" "$INIT"
+[ -f "$BK/S99pdm-agent" ] && $INIT start
+echo "pdm-agent: откат выполнен"
+RB
+chmod +x "$BK/rollback.sh"
+
+# ---------- agent
+cat > "$DIR/pdm_agent.py.new" <<'PYEOF'
+@@AGENT_PY@@
+PYEOF
+/opt/bin/python3 -m py_compile "$DIR/pdm_agent.py.new"
+rm -rf "$DIR/__pycache__"
+mv "$DIR/pdm_agent.py.new" "$DIR/pdm_agent.py"
+chmod +x "$DIR/pdm_agent.py"
+
+# ---------- config: token is created once and kept
+if [ ! -f "$DIR/config.json" ]; then
+  TOKEN=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
+  printf '{"port": %s, "token": "%s"}\n' "$PORT" "$TOKEN" > "$DIR/config.json"
+  chmod 600 "$DIR/config.json"
+fi
+
+# ---------- service (own pid file: never touches other python processes)
+cat > "$INIT" <<'INITEOF'
+#!/bin/sh
+PID=/opt/var/run/pdm-agent.pid
+LOG=/opt/var/log/pdm-agent.log
+start() {
+  if [ -f $PID ] && kill -0 "$(cat $PID)" 2>/dev/null; then echo "pdm-agent уже работает"; return 0; fi
+  mkdir -p /opt/var/run /opt/var/log
+  [ -f $LOG ] && [ "$(wc -c < $LOG)" -gt 1000000 ] && mv -f $LOG $LOG.1
+  nohup /opt/bin/python3 /opt/pdm/pdm_agent.py >> $LOG 2>&1 &
+  echo $! > $PID
+}
+stop() {
+  [ -f $PID ] && kill "$(cat $PID)" 2>/dev/null
+  rm -f $PID
+  sleep 1
+}
+case "$1" in
+  start) start ;;
+  stop) stop ;;
+  restart) stop; start ;;
+  status) [ -f $PID ] && kill -0 "$(cat $PID)" 2>/dev/null && echo "работает" || echo "остановлен" ;;
+  *) echo "start|stop|restart|status" ;;
+esac
+INITEOF
+chmod +x "$INIT"
+
+# ---------- start + health check
+$INIT restart
+OK=""
+i=0
+while [ $i -lt 10 ]; do
+  sleep 2
+  i=$((i + 1))
+  if /opt/bin/python3 -c "import urllib.request,sys; sys.exit(0 if b'\"ok\"' in urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=3).read() else 1)" 2>/dev/null; then
+    OK=1; break
+  fi
+done
+if [ -z "$OK" ]; then
+  echo "pdm-agent не ответил за 20 секунд, откатываю. Последние строки журнала:"
+  tail -n 15 /opt/var/log/pdm-agent.log 2>/dev/null
+  sh "$BK/rollback.sh"
+  exit 1
+fi
+
+TOKEN=$(/opt/bin/python3 -c "import json; print(json.load(open('$DIR/config.json')).get('token',''))")
+ls -1dt $DIR/backup-* 2>/dev/null | tail -n +6 | xargs rm -rf 2>/dev/null || true
+echo
+echo "pdm-agent работает."
+echo "Страница для пассажиров: http://192.168.1.1:$PORT/"
+echo "Ключ для приложения (Настройки → Агент на роутере):"
+echo
+echo "$TOKEN"
+echo
+echo "Откат: sh $BK/rollback.sh"

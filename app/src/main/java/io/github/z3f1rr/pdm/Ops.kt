@@ -136,13 +136,19 @@ object Ops {
 
     /** The user's numbers: left now (GB), package size, payment day, rollover. Counting restarts from here. */
     fun setQuota(ctx: Context, i: Int, leftGb: Double, packGb: Int, day: Int, roll: Boolean) {
+        if (Agent.active()) {
+            run(ctx, "quota$i") {
+                Agent.post(it, "/api/quota", org.json.JSONObject().put("i", i).put("left_gb", leftGb).put("pack", packGb).put("day", day).put("roll", roll))
+                Agent.poll(it)
+            }
+        }
         val now = System.currentTimeMillis()
         prefs(ctx).edit()
             .putLong("q_left$i", (leftGb * 1e9).toLong()).putLong("q_used$i", 0).putLong("q_usedall$i", 0)
             .putInt("q_pack$i", packGb).putInt("q_day$i", day).putBoolean("q_roll$i", roll)
             .putLong("q_set$i", now).putLong("q_renew$i", now).putLong("q_last$i", -1)
             .apply()
-        loadQuotas(ctx)
+        if (!Agent.active()) loadQuotas(ctx)
     }
 
     /**

@@ -718,6 +718,7 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
     var u1 by remember { mutableStateOf(Ops.ussd(ctx, 1)) }
     var login by remember { mutableStateOf(Ops.routerLogin(ctx)) }
     var pass by remember { mutableStateOf(Ops.routerPass(ctx)) }
+    var agentKey by remember { mutableStateOf(Agent.token(ctx)) }
     var server by remember { mutableStateOf(Monitor.server(ctx)) }
     var interval by remember { mutableStateOf(Monitor.intervalSec(ctx).toString()) }
     var routeOn by remember { mutableStateOf(Ops.routeLog(ctx)) }
@@ -781,6 +782,12 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
                 visualTransformation = PasswordVisualTransformation(),
             )
         }
+        OutlinedTextField(
+            agentKey, { agentKey = it.trim() }, label = { Text("Ключ агента на роутере") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+            supportingText = {
+                if (agentKey.isNotEmpty()) Text(if (Agent.online.value) "Агент работает: статистика и автоматика на роутере" else "Агент не отвечает")
+            },
+        )
 
         SectionTitle("Модемы")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -798,6 +805,7 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
             onClick = {
                 Monitor.save(ctx, listOf(ModemConfig(n0, i0), ModemConfig(n1, i1)), interval.toIntOrNull() ?: 10, server)
                 Ops.saveRouter(ctx, login, pass, listOf(u0, u1))
+                Agent.setToken(ctx, agentKey)
                 Monitor.message.value = "Сохранено"
                 if (running) MonitorService.start(ctx)
                 close()
@@ -828,6 +836,9 @@ private fun FlagRow(title: String, hint: String, key: String, initial: Boolean, 
                 Monitor.setFlag(ctx, key, v)
                 Monitor.resetPlace()
                 onChange?.invoke(v)
+                if (key in listOf("auto_main", "heal", "auto_reg") && Agent.active()) {
+                    Ops.run(ctx, "agentset") { Agent.post(it, "/api/settings", org.json.JSONObject().put(key, v)) }
+                }
                 if (running) MonitorService.start(ctx)
             },
             colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Bg),
@@ -948,7 +959,18 @@ private fun RouterSheet(r: RouterState?, cfg: List<ModemConfig>) {
             if (showOffline) offline.forEach { cl -> ClientRow(cl) { limitFor = cl } }
         }
 
-        SectionTitle("Журнал")
+        val events = Agent.events.value
+        if (events.isNotEmpty()) {
+            SectionTitle("События")
+            events.take(15).forEach { e ->
+                Row(Modifier.padding(vertical = 3.dp)) {
+                    Text(SimpleDateFormat("dd.MM HH:mm", Locale.US).format(Date(e.time)), color = C.Text3, style = Num.copy(fontSize = 12.sp), modifier = Modifier.width(84.dp))
+                    Text(e.text, color = C.Text2, style = Num.copy(fontSize = 12.sp, lineHeight = 16.sp))
+                }
+            }
+        }
+
+        SectionTitle("Журнал роутера")
         when {
             log == null -> Pill(if ("log" in busy) "Загружаю…" else "Показать", busy = "log" in busy) { Ops.run(ctx, "log") { Ops.loadLog(it) } }
             log.isEmpty() -> Text("Событий нет", color = C.Text2, style = MaterialTheme.typography.bodyMedium)

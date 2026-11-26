@@ -293,12 +293,15 @@ class MonitorService : Service() {
             }
         }
         modems = states
-        heal(states, now)
-        states.forEachIndexed { i, m ->
-            if (m.ok) m.totalBytes?.let { Ops.countTraffic(this, i, it); Stats.addModem(this, i, it) }
+        // with the agent on the router, counting and healing are its job
+        if (!Agent.active()) {
+            heal(states, now)
+            states.forEachIndexed { i, m ->
+                if (m.ok) m.totalBytes?.let { Ops.countTraffic(this, i, it); Stats.addModem(this, i, it) }
+            }
+            Stats.flush(this)
+            if (now - lastQuotaLoad > 30_000) { lastQuotaLoad = now; Ops.loadQuotas(this) }
         }
-        Stats.flush(this)
-        if (now - lastQuotaLoad > 30_000) { lastQuotaLoad = now; Ops.loadQuotas(this) }
         watchSms(states)
         logRoute(states, now)
         val hist = synchronized(history) {
@@ -470,19 +473,21 @@ class MonitorService : Service() {
     private fun pollRouter(): Long {
         val c = current
         if (c?.where != Where.TRAIN) {
-            Monitor.post { Ops.router.value = null }
+            Monitor.post { Ops.router.value = null; Agent.online.value = false }
             return 60_000L
         }
+        if (Agent.token(this).isNotEmpty()) Agent.poll(this)
+        val agent = Agent.active()
         val k = Ops.keenetic(this)
         if (k != null) {
             val prev = Ops.router.value
             val next = try {
-                k.poll(prev, Monitor.config(this), Ops.autoRegister(this))
+                k.poll(prev, Monitor.config(this), Ops.autoRegister(this) && !agent)
             } catch (e: Exception) {
                 (prev ?: RouterState()).copy(error = Monitor.short(e).substringAfter(": "))
             }
             Monitor.post { Ops.router.value = next }
-            if (next.error == null) {
+            if (next.error == null && !agent) {
                 Stats.addDevices(this, next.clients)
                 try { autoMain(k, next) } catch (_: Exception) {}
             }
