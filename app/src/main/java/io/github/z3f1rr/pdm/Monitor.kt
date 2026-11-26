@@ -147,9 +147,14 @@ object Monitor {
         return cm.allNetworks.mapNotNull { n ->
             val c = cm.getNetworkCapabilities(n) ?: return@mapNotNull null
             if (!c.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
+            // only a real connection to an access point: tethering apps (VPN Hotspot, Wi-Fi Direct
+            // repeater) can add Wi-Fi networks with no signal and no gateway, where the phone itself is the AP
+            val rssi = (c.transportInfo as? android.net.wifi.WifiInfo)?.rssi
+            val gw = gateway(ctx, n)
+            if (gw == null && (rssi == null || rssi !in -120..-1)) return@mapNotNull null
             var score = 0
             if (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) score += 4
-            if (gateway(ctx, n) != null) score += 2
+            if (gw != null) score += 2
             if (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)) score += 1
             n to score
         }.sortedByDescending { it.second }.map { it.first }
