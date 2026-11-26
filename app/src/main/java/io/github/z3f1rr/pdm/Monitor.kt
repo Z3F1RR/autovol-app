@@ -15,7 +15,7 @@ import java.security.SecureRandom
 data class ModemConfig(val name: String, val ip: String)
 
 /** What the router can actually reach right now. NO_WIFI and FOREIGN mean checks are paused. */
-enum class Net { FULL, WHITELIST, NONE, NO_WIFI, FOREIGN }
+enum class Net { FULL, WHITELIST, NONE, SLOW, NO_WIFI, FOREIGN }
 
 /** Where the phone is: on the train router's Wi-Fi, without Wi-Fi, or on some other Wi-Fi. */
 enum class Place { TRAIN, NO_WIFI, FOREIGN }
@@ -364,6 +364,33 @@ object Monitor {
     fun short(e: Throwable): String {
         val m = (e.message ?: "").replace(Regex("https?://[^ ]+"), "").trim()
         return e.javaClass.simpleName + if (m.isNotEmpty()) ": " + m.take(80) else ""
+    }
+
+    /**
+     * A frozen path (DPI lets the first ~16 KB of a connection to a foreign server through, then
+     * silence) passes tiny checks. So once a minute 64 KB is pulled from the own server: it must
+     * arrive whole within 8 s.
+     */
+    fun bulk(network: Network, base: String): Probe {
+        val start = System.nanoTime()
+        val c = try { open(network, "$base/down?mb=1", read = 4000) } catch (e: Exception) { return Probe(null, short(e)) }
+        var got = 0
+        return try {
+            if (c.responseCode != 200) return Probe(null, "HTTP ${c.responseCode}")
+            val buf = ByteArray(16 * 1024)
+            c.inputStream.use { s ->
+                while (got < 64 * 1024 && System.nanoTime() - start < 8_000_000_000L) {
+                    val n = s.read(buf)
+                    if (n < 0) break
+                    got += n
+                }
+            }
+            if (got >= 64 * 1024) Probe(ms(start)) else Probe(null, "встала на ${got / 1024} КБ из 64")
+        } catch (e: Exception) {
+            Probe(null, "встала на ${got / 1024} КБ из 64")
+        } finally {
+            c.disconnect()
+        }
     }
 
     private val FULL_URLS = listOf(

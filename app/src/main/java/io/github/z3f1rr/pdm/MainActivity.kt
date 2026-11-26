@@ -288,6 +288,7 @@ private fun Status(s: Snapshot?, running: Boolean, now: Long) {
         s.where == null -> Triple(C.Text3, "На паузе", s.label)
         s.net == Net.FULL -> Triple(C.Green, "Интернет есть", join(s.label, s.latencyMs?.let { "$it мс" }))
         s.net == Net.WHITELIST -> Triple(C.Amber, "Белые списки", join(s.label, dur))
+        s.net == Net.SLOW -> Triple(C.Amber, "Плохая связь", join(s.label, dur))
         else -> Triple(C.Red, "Нет интернета", join(s.label, if (dur.isNotEmpty()) "уже $dur" else null))
     }
     val age = s?.let { ((now - it.time) / 1000).coerceAtLeast(0) }

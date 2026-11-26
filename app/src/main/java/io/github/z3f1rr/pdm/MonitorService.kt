@@ -238,6 +238,7 @@ class MonitorService : Service() {
         val now = System.currentTimeMillis()
         if (prev?.where != c?.where || prev?.network != c?.network) {
             confirmed = null; pending = null; latency = null; why = ""; recheckSoon = false; since = now
+            recent.clear(); bulkErr = null; lastBulk = 0
             modems = emptyList(); local = null
             synchronized(history) { history.forEach { it.clear() }; localHist.clear() }
             Monitor.post { Monitor.history.value = emptyList(); Monitor.localHistory.value = emptyList() }
@@ -308,30 +309,61 @@ class MonitorService : Service() {
         return interval(c)
     }
 
+    /** Last raw results, newest last: the state comes from them, not from one lucky check. */
+    private val recent = ArrayDeque<Pair<Net, Int?>>()
+    private var lastBulk = 0L
+    private var bulkErr: String? = null
+    private var lastAlertAt = 0L
+
+    /**
+     * FULL / WHITELIST only when the last two checks agree and answer in under 1.5 s; two failures in
+     * a row are NONE; anything in between (slow answers, every other check failing, a frozen path) is
+     * SLOW. A single tiny request that squeezes through at 3 s is not "internet is fine".
+     */
     private fun checkNet(): Long {
         val c = resolve() ?: return pausedWait()
-        val (raw, ms, reasons) = Monitor.check(Monitor.via(this, c.network), Monitor.server(this))
+        val net = Monitor.via(this, c.network)
+        val server = Monitor.server(this)
+        var (raw, ms, reasons) = Monitor.check(net, server)
+        val now = System.currentTimeMillis()
+        if (raw == Net.FULL && server.isNotEmpty() && now - lastBulk >= 60_000) {
+            lastBulk = now
+            bulkErr = Monitor.bulk(net, server).let { p -> if (p.ms == null) "загрузка 64 КБ ${p.err}" else null }
+        }
+        if (raw != Net.FULL) bulkErr = null
+        bulkErr?.let { if (raw == Net.FULL) { raw = Net.SLOW; reasons = it } }
         // the link changed while we were checking: drop this result
         if (current?.network != c.network) return 1000L
-        val now = System.currentTimeMillis()
+
+        recent.addLast(raw to ms)
+        while (recent.size > 4) recent.removeFirst()
+        val last2 = recent.toList().takeLast(2)
+        fun fast(p: Pair<Net, Int?>) = (p.second ?: Int.MAX_VALUE) < SLOW_MS
+        val cand = when {
+            last2.size < 2 -> if (raw == Net.FULL && !fast(raw to ms)) Net.SLOW else raw
+            last2.all { it.first == Net.NONE } -> Net.NONE
+            last2.all { it.first == Net.FULL && fast(it) } -> Net.FULL
+            last2.all { it.first == Net.WHITELIST && fast(it) } -> Net.WHITELIST
+            last2.all { it.first == Net.NONE || it.first == Net.SLOW || it.first == Net.FULL || it.first == Net.WHITELIST } -> Net.SLOW
+            else -> raw
+        }
         val prev = confirmed
         val paused = prev == null || prev == Net.NO_WIFI || prev == Net.FOREIGN
-        var changed = false
-        when {
-            paused -> {
-                if (raw != prev) since = now
-                confirmed = raw; pending = null
-            }
-            raw == prev -> pending = null
-            pending == raw -> { confirmed = raw; since = now; pending = null; changed = true }
-            else -> pending = raw
+        val changed = cand != prev
+        if (changed) since = now
+        confirmed = cand
+        latency = ms ?: latency
+        why = when {
+            cand == Net.SLOW && reasons.isEmpty() && ms != null && ms >= SLOW_MS -> "отклик ${"%.1f".format(java.util.Locale("ru"), ms / 1000.0)} с"
+            cand == Net.SLOW && reasons.isEmpty() -> "часть проверок не проходит"
+            else -> reasons
         }
-        recheckSoon = pending != null
-        if (confirmed == raw) { latency = ms; why = reasons }
+        recheckSoon = last2.size == 2 && last2[0].first != last2[1].first
         publish()
-        val cur = confirmed
-        if (changed && cur != null) {
-            getSystemService(NotificationManager::class.java).notify(ID_ALERT, buildAlert(cur, c.label))
+        // no alert for the first result on a link; no flood when the state wobbles
+        if (changed && !paused && (cand == Net.NONE || now - lastAlertAt > 120_000)) {
+            lastAlertAt = now
+            getSystemService(NotificationManager::class.java).notify(ID_ALERT, buildAlert(cand, c.label))
         }
         return if (recheckSoon) 3000L else interval(c)
     }
@@ -347,7 +379,7 @@ class MonitorService : Service() {
             modems = if (c?.where == Where.TRAIN) modems else emptyList(),
             net = net, latencyMs = latency, time = System.currentTimeMillis(), since = since,
             where = c?.where, label = c?.label ?: pausedLabel, local = if (c != null && c.where != Where.TRAIN) local else null,
-            why = if (c != null && net == Net.NONE) why else "",
+            why = if (c != null && (net == Net.NONE || net == Net.SLOW)) why else "",
         )
         Monitor.post { Monitor.snapshot.value = snap }
         try {
@@ -637,6 +669,7 @@ class MonitorService : Service() {
                 when (net) {
                     Net.FULL -> "Интернет вернулся"
                     Net.WHITELIST -> "Только белые списки"
+                    Net.SLOW -> "Связь плохая"
                     else -> "Интернет пропал"
                 },
             )
@@ -674,6 +707,7 @@ class MonitorService : Service() {
         const val ACTION_UPS_RESET = "pdm.UPS_RESET"
         const val EXTRA_INDEX = "index"
         const val UPS_DEAD_MS = 5 * 60_000L
+        private const val SLOW_MS = 1500
         private const val CH_STATUS = "status"
         private const val CH_ALERT = "alert"
         private const val ID_STATUS = 1
@@ -691,6 +725,7 @@ class MonitorService : Service() {
                 Net.FULL -> "Интернет есть" + (s.latencyMs?.let { " · $it мс" } ?: "")
                 Net.WHITELIST -> "Только белые списки$dur"
                 Net.NONE -> "Нет интернета$dur"
+                Net.SLOW -> "Плохая связь$dur"
                 Net.NO_WIFI, Net.FOREIGN -> "Проверки на паузе"
             }
         }
