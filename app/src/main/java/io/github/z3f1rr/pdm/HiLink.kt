@@ -20,6 +20,8 @@ data class ModemState(
     val ulMbps: Double = 0.0,
     /** Unread SMS on the SIM. */
     val unread: Int = 0,
+    /** Modem's own lifetime traffic counter (download + upload), bytes; survives reboots. */
+    val totalBytes: Long? = null,
 ) {
     /** 0..4 bars from RSRP and SINR. */
     val quality: Int
@@ -109,6 +111,7 @@ class HiLink(private val ip: String, private val network: Network?) {
             dlMbps = (num(tag(tr, "CurrentDownloadRate")) ?: 0) * 8 / 1e6,
             ulMbps = (num(tag(tr, "CurrentUploadRate")) ?: 0) * 8 / 1e6,
             unread = num(tag(notif, "UnreadMessage")) ?: 0,
+            totalBytes = numL(tag(tr, "TotalDownload"))?.let { d -> d + (numL(tag(tr, "TotalUpload")) ?: 0) },
         )
     }
 
@@ -182,14 +185,31 @@ class HiLink(private val ip: String, private val network: Network?) {
 
         fun esc(s: String) = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-        fun unesc(s: String) = s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"")
-            .replace("&apos;", "'").replace("&#10;", "\n").replace("&amp;", "&")
+        /** XML entities; SMS text comes escaped twice ("&amp;#x2F;"), so numeric ones are decoded after &amp;. */
+        fun unesc(s: String): String {
+            val t = s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+            return Regex("&#(x[0-9a-fA-F]+|\\d+);").replace(t) { m ->
+                val v = m.groupValues[1]
+                val code = if (v.startsWith("x")) v.drop(1).toIntOrNull(16) else v.toIntOrNull()
+                code?.let { String(Character.toChars(it)) } ?: m.value
+            }.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&amp;", "&")
+        }
+
+        fun numL(s: String?): Long? = s?.let { Regex("-?\\d+").find(it)?.value?.toLongOrNull() }
 
         fun num(s: String?): Int? = s?.let { Regex("-?\\d+").find(it)?.value?.toIntOrNull() }
 
         private fun check(xml: String, path: String) {
             if (xml.contains("<error>")) {
-                throw IllegalStateException("модем ответил ошибкой ${tag(xml, "code") ?: "?"} на $path")
+                val code = tag(xml, "code") ?: "?"
+                throw IllegalStateException(
+                    when {
+                        code == "100002" && path.contains("ussd") -> "Модем не поддерживает USSD"
+                        code == "100002" -> "Модем не поддерживает эту функцию"
+                        code == "100003" -> "Модем запретил это действие"
+                        else -> "модем ответил ошибкой $code на $path"
+                    },
+                )
             }
         }
     }

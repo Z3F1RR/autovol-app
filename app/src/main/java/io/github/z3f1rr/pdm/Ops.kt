@@ -13,6 +13,42 @@ import java.util.concurrent.Executors
 
 data class Balance(val text: String, val rub: Double?, val time: Long)
 
+/**
+ * Data left on a SIM's package. The user enters "left now" once; after that the modem's own byte
+ * counter is subtracted, and on the payment day the package is added (with or without rollover).
+ */
+data class Quota(
+    val leftBytes: Long,
+    val packGb: Int,
+    /** Day of month the package renews, 0 = unknown. */
+    val day: Int,
+    val rollover: Boolean,
+    /** When the user last entered the numbers: for the usage-per-day estimate. */
+    val setAt: Long,
+    val usedSinceSet: Long,
+) {
+    val leftGb: Double get() = leftBytes / 1e9
+    val fraction: Double get() = if (packGb > 0) leftBytes / (packGb * 1e9) else 1.0
+
+    /** Days until the next payment day. */
+    fun daysToRenew(now: Long = System.currentTimeMillis()): Int? {
+        if (day !in 1..31) return null
+        val c = java.util.Calendar.getInstance().apply { timeInMillis = now }
+        val n = java.util.Calendar.getInstance().apply {
+            timeInMillis = now
+            set(java.util.Calendar.DAY_OF_MONTH, minOf(day, getActualMaximum(java.util.Calendar.DAY_OF_MONTH)))
+            if (!after(c)) { add(java.util.Calendar.MONTH, 1); set(java.util.Calendar.DAY_OF_MONTH, minOf(day, getActualMaximum(java.util.Calendar.DAY_OF_MONTH))) }
+        }
+        return ((n.timeInMillis - now) / 86_400_000L).toInt()
+    }
+
+    /** GB per day so far, once at least 6 hours of data exist. */
+    fun perDayGb(now: Long = System.currentTimeMillis()): Double? {
+        val days = (now - setAt) / 86_400_000.0
+        return if (days >= 0.25) usedSinceSet / 1e9 / days else null
+    }
+}
+
 /** LTE band presets for the modem sheet: label to hex mask. */
 val BAND_PRESETS = listOf(
     "Все" to "7FFFFFFFFFFFFFFF",
@@ -37,6 +73,9 @@ object Ops {
     val router = mutableStateOf<RouterState?>(null)
     val log = mutableStateOf<List<LogLine>?>(null)
     val balances = mutableStateOf<Map<Int, Balance>>(emptyMap())
+    val quotas = mutableStateOf<Map<Int, Quota>>(emptyMap())
+    /** Modems whose firmware has no USSD: the balance block is hidden for them. */
+    val ussdOff = mutableStateOf<Set<Int>>(emptySet())
     val sms = mutableStateOf<Map<Int, List<HiLink.Sms>>>(emptyMap())
     val bands = mutableStateOf<Map<Int, String>>(emptyMap())
     /** Keys of operations in progress: "bal0", "sms1", "bands0", "log", "limit:<mac>"… */
@@ -71,12 +110,81 @@ object Ops {
     fun routerPass(ctx: Context) = prefs(ctx).getString("r_pass", "")!!
     fun ussd(ctx: Context, i: Int) = prefs(ctx).getString("ussd$i", "*100#")!!
     fun heal(ctx: Context) = prefs(ctx).getBoolean("heal", true)
+    fun autoMain(ctx: Context) = prefs(ctx).getBoolean("auto_main", true)
     fun routeLog(ctx: Context) = prefs(ctx).getBoolean("route_log", false)
 
     fun saveRouter(ctx: Context, login: String, pass: String, ussd: List<String>) {
         val e = prefs(ctx).edit().putString("r_login", login.trim()).putString("r_pass", pass)
         ussd.forEachIndexed { i, c -> e.putString("ussd$i", c.trim().ifEmpty { "*100#" }) }
         e.apply()
+    }
+
+    // ---------------------------------------------------------------- data packages
+
+    fun loadQuotas(ctx: Context) {
+        val p = prefs(ctx)
+        val m = (0..1).mapNotNull { i ->
+            val set = p.getLong("q_set$i", 0)
+            if (set == 0L) null else i to Quota(
+                leftBytes = p.getLong("q_left$i", 0) - p.getLong("q_used$i", 0),
+                packGb = p.getInt("q_pack$i", 100), day = p.getInt("q_day$i", 0),
+                rollover = p.getBoolean("q_roll$i", false), setAt = set, usedSinceSet = p.getLong("q_usedall$i", 0),
+            )
+        }.toMap()
+        Monitor.post { quotas.value = m }
+    }
+
+    /** The user's numbers: left now (GB), package size, payment day, rollover. Counting restarts from here. */
+    fun setQuota(ctx: Context, i: Int, leftGb: Double, packGb: Int, day: Int, roll: Boolean) {
+        val now = System.currentTimeMillis()
+        prefs(ctx).edit()
+            .putLong("q_left$i", (leftGb * 1e9).toLong()).putLong("q_used$i", 0).putLong("q_usedall$i", 0)
+            .putInt("q_pack$i", packGb).putInt("q_day$i", day).putBoolean("q_roll$i", roll)
+            .putLong("q_set$i", now).putLong("q_renew$i", now).putLong("q_last$i", -1)
+            .apply()
+        loadQuotas(ctx)
+    }
+
+    /**
+     * Called on every modem poll with the modem's lifetime counter. A counter that went down means the
+     * modem reset it: then the whole new value is fresh traffic. Applies the monthly renewal too.
+     */
+    fun countTraffic(ctx: Context, i: Int, counter: Long) {
+        val p = prefs(ctx)
+        if (p.getLong("q_set$i", 0) == 0L) return
+        val last = p.getLong("q_last$i", -1)
+        val e = p.edit().putLong("q_last$i", counter)
+        if (last >= 0) {
+            val delta = if (counter >= last) counter - last else counter
+            // more than 2 GB in one poll is not real traffic: a counter glitch, skip it
+            if (delta in 1..2_000_000_000L) {
+                e.putLong("q_used$i", p.getLong("q_used$i", 0) + delta)
+                e.putLong("q_usedall$i", p.getLong("q_usedall$i", 0) + delta)
+            }
+        }
+        val day = p.getInt("q_day$i", 0)
+        if (day in 1..31) {
+            val renewAt = lastRenewal(day)
+            if (p.getLong("q_renew$i", 0) < renewAt) {
+                val left = p.getLong("q_left$i", 0) - p.getLong("q_used$i", 0)
+                val pack = p.getInt("q_pack$i", 100) * 1_000_000_000L
+                val roll = p.getBoolean("q_roll$i", false)
+                e.putLong("q_left$i", if (roll) maxOf(0, left) + pack else pack).putLong("q_used$i", 0).putLong("q_renew$i", renewAt)
+            }
+        }
+        e.apply()
+    }
+
+    /** Start of the most recent payment day (today if it's the day). */
+    private fun lastRenewal(day: Int): Long {
+        val c = java.util.Calendar.getInstance()
+        fun on(cal: java.util.Calendar) = cal.apply {
+            set(java.util.Calendar.DAY_OF_MONTH, minOf(day, getActualMaximum(java.util.Calendar.DAY_OF_MONTH)))
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val thisMonth = on(java.util.Calendar.getInstance())
+        if (!thisMonth.after(c)) return thisMonth.timeInMillis
+        return on(java.util.Calendar.getInstance().apply { add(java.util.Calendar.MONTH, -1) }).timeInMillis
     }
 
     // ---------------------------------------------------------------- clients
@@ -100,6 +208,7 @@ object Ops {
 
     fun loadBalances(ctx: Context) {
         val p = prefs(ctx)
+        ussdOff.value = (0..1).filter { p.getBoolean("ussd_off$it", false) }.toSet()
         balances.value = (0..1).mapNotNull { i ->
             val t = p.getLong("balt$i", 0)
             if (t == 0L) null else i to Balance(p.getString("bal$i", "")!!, rub(p.getString("bal$i", "")!!), t)
@@ -108,7 +217,13 @@ object Ops {
 
     /** USSD balance request; returns the parsed balance. Used by the screen and by the 6-hour auto check. */
     fun balance(ctx: Context, i: Int): Balance {
-        val text = modem(ctx, i).ussd(ussd(ctx, i))
+        val text = try { modem(ctx, i).ussd(ussd(ctx, i)) } catch (e: IllegalStateException) {
+            if (e.message?.contains("не поддерживает") == true) {
+                prefs(ctx).edit().putBoolean("ussd_off$i", true).apply()
+                Monitor.post { ussdOff.value = ussdOff.value + i }
+            }
+            throw e
+        }
         val b = Balance(text, rub(text), System.currentTimeMillis())
         prefs(ctx).edit().putString("bal$i", text).putLong("balt$i", b.time).apply()
         Monitor.post { balances.value = balances.value + (i to b) }

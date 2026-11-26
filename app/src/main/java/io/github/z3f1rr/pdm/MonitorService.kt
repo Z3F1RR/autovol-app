@@ -294,6 +294,8 @@ class MonitorService : Service() {
         }
         modems = states
         heal(states, now)
+        states.forEachIndexed { i, m -> if (m.ok) m.totalBytes?.let { Ops.countTraffic(this, i, it) } }
+        if (now - lastQuotaLoad > 30_000) { lastQuotaLoad = now; Ops.loadQuotas(this) }
         watchSms(states)
         logRoute(states, now)
         val hist = synchronized(history) {
@@ -460,6 +462,7 @@ class MonitorService : Service() {
     // ---------------------------------------------------------------- router (Keenetic)
 
     private var lastBalanceTry = 0L
+    private var lastQuotaLoad = 0L
 
     private fun pollRouter(): Long {
         val c = current
@@ -476,6 +479,7 @@ class MonitorService : Service() {
                 (prev ?: RouterState()).copy(error = Monitor.short(e).substringAfter(": "))
             }
             Monitor.post { Ops.router.value = next }
+            if (next.error == null) try { autoMain(k, next) } catch (_: Exception) {}
         }
         autoBalance()
         return Monitor.intervalSec(this) * 1000L
@@ -490,12 +494,74 @@ class MonitorService : Service() {
             if (!m.ok || !m.connected) return@forEachIndexed
             val old = Ops.balances.value[i]
             if (old != null && now - old.time < 6 * 3600_000L) return@forEachIndexed
-            val b = try { Ops.balance(this, i) } catch (e: Exception) { return@forEachIndexed }
+            val p = getSharedPreferences("pdm", MODE_PRIVATE)
+            if (p.getBoolean("ussd_off$i", false)) return@forEachIndexed
+            val b = try { Ops.balance(this, i) } catch (e: Exception) {
+                // the modem's firmware has no USSD: don't ask again every 6 hours
+                if (e.message?.contains("не поддерживает") == true) p.edit().putBoolean("ussd_off$i", true).apply()
+                return@forEachIndexed
+            }
             val name = Monitor.config(this).getOrNull(i)?.name ?: "SIM"
             if (b.rub != null && b.rub < 100 && (old?.rub == null || old.rub >= 100)) {
                 alert(ID_ALERT + 20 + i, "$name: на балансе ${b.rub.toInt()} ₽", b.text)
             }
         }
+    }
+
+    // ---------------------------------------------------------------- choosing the main channel
+
+    private var betterSince = 0L
+    private var lastSwitch = 0L
+
+    /** Signal score over the last 3 minutes: SINR decides the speed, RSRP adds a little. */
+    private fun score(i: Int, now: Long): Double? {
+        val pts = synchronized(history) { history.getOrNull(i)?.filter { now - it.t < 3 * 60_000 }.orEmpty() }
+        val sinr = pts.mapNotNull { it.sinr }.takeIf { it.isNotEmpty() }?.average() ?: return null
+        val rsrp = pts.mapNotNull { it.rsrp }.takeIf { it.isNotEmpty() }?.average() ?: -110.0
+        return sinr + ((rsrp + 105) / 4).coerceIn(-6.0, 6.0)
+    }
+
+    /**
+     * Makes the better modem the main one:
+     * - clearly better signal (score +6) — it will be faster;
+     * - about the same signal — the one with more of its package left, so both SIMs get used;
+     * - the main SIM's package is almost gone;
+     * - the other SIM idled for 36 h: MTS blocks data on a SIM unused for 72 h.
+     * The advantage must hold for 3 minutes, and switches are at least 20 minutes apart:
+     * every switch breaks open connections (calls, VPN reconnects).
+     */
+    private fun autoMain(k: Keenetic, r: RouterState) {
+        val now = System.currentTimeMillis()
+        val p = getSharedPreferences("pdm", MODE_PRIVATE)
+        val main = r.channels.firstOrNull { it.main && it.modem in 0..1 } ?: return
+        val mi = main.modem
+        p.edit().putLong("main_at$mi", now).apply()
+        if (!Ops.autoMain(this)) { betterSince = 0; return }
+        val oi = 1 - mi
+        val other = r.channels.firstOrNull { it.modem == oi } ?: return
+        val mo = modems.getOrNull(oi) ?: return
+        if (!mo.ok || !mo.connected || !other.connected) { betterSince = 0; return }
+        val sMain = score(mi, now) ?: -100.0
+        val sOther = score(oi, now) ?: return
+        val q = Ops.quotas.value
+        val qm = q[mi]
+        val qo = q[oi]
+        val idleSince = p.getLong("main_at$oi", 0).let { if (it == 0L) { p.edit().putLong("main_at$oi", now).apply(); now } else it }
+        val reason = when {
+            sOther - sMain >= 6 -> "сигнал лучше"
+            qm != null && qo != null && qm.leftGb < 1 && qo.leftGb > 1 -> "на основной SIM кончается пакет"
+            kotlin.math.abs(sOther - sMain) < 3 && qm != null && qo != null && qo.fraction - qm.fraction > 0.2 -> "там больше осталось трафика"
+            now - idleSince > 36 * 3600_000L && sOther > sMain - 6 -> "SIM давно не работала, оператор может её заблокировать"
+            else -> null
+        }
+        if (reason == null) { betterSince = 0; return }
+        if (betterSince == 0L) betterSince = now
+        if (now - betterSince < 3 * 60_000 || now - lastSwitch < 20 * 60_000) return
+        k.makeMain(other.iface, r.channels)
+        lastSwitch = now
+        betterSince = 0
+        val name = Monitor.config(this).getOrNull(oi)?.name ?: "другой модем"
+        alert(ID_ALERT + 40, "Основной канал: $name", reason)
     }
 
     // ---------------------------------------------------------------- modem self-healing

@@ -160,6 +160,7 @@ class MainActivity : ComponentActivity() {
         if (Monitor.speed.value == null) Monitor.speed.value = Monitor.loadSpeed(this)
         Monitor.ups.value = Monitor.loadUps(this)
         Ops.loadBalances(this)
+        Ops.loadQuotas(this)
         if (getSharedPreferences("pdm", MODE_PRIVATE).getBoolean("auto", true)) MonitorService.start(this)
         setContent {
             MaterialTheme(colorScheme = Scheme, typography = onestTypography()) { Screen() }
@@ -230,7 +231,7 @@ private fun Screen() {
             if (running && where == Where.TRAIN) {
                 if (router != null) RouterCard(router, cfg) { routerSheet = true }
                 cfg.forEachIndexed { i, c ->
-                    ModemCard(c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(), balances[i]) { modemSheet = i }
+                    ModemCard(c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(), balances[i], Ops.quotas.value[i]) { modemSheet = i }
                 }
             }
 
@@ -385,7 +386,7 @@ private fun fmtSpeed(v: Double?) = when {
 // ---------------------------------------------------------------- modem card
 
 @Composable
-private fun ModemCard(c: ModemConfig, m: ModemState?, hist: List<Point>, bal: Balance?, onOpen: () -> Unit) {
+private fun ModemCard(c: ModemConfig, m: ModemState?, hist: List<Point>, bal: Balance?, quota: Quota?, onOpen: () -> Unit) {
     val live = m != null && m.ok && m.connected
     val q = if (live) m!!.quality else 0
     val tone = when {
@@ -409,7 +410,7 @@ private fun ModemCard(c: ModemConfig, m: ModemState?, hist: List<Point>, bal: Ba
                         m == null -> "Ожидание"
                         !m.ok -> "Не отвечает"
                         !m.connected -> "Нет сети"
-                        else -> listOfNotNull(m.net, m.band.takeIf { it.isNotEmpty() }?.let { "B$it" }, bal?.rub?.let { rub(it) })
+                        else -> listOfNotNull(m.net, m.band.takeIf { it.isNotEmpty() }?.let { "B$it" }, quota?.let { gb(it.leftGb) } ?: bal?.rub?.let { rub(it) })
                             .joinToString(" · ")
                     },
                     color = if (live) C.Text2 else C.Red, style = Num.copy(fontSize = 14.sp),
@@ -439,6 +440,8 @@ private fun Badge(text: String) {
         modifier = Modifier.clip(RoundedCornerShape(50)).background(C.Blue).padding(horizontal = 7.dp, vertical = 1.dp),
     )
 }
+
+private fun gb(v: Double) = if (v >= 10) "%.0f ГБ".format(Locale("ru"), v) else "%.1f ГБ".format(Locale("ru"), v)
 
 private fun rub(v: Double) = "%,.0f ₽".format(Locale("ru"), v).replace('\u00a0', ' ')
 
@@ -730,6 +733,7 @@ private fun SettingsSheet(running: Boolean, close: () -> Unit) {
         FlagRow("Мобильный интернет", "Проверять, когда Wi-Fi нет", "mobile", Monitor.mobile(ctx), running)
         FlagRow("Имя Wi-Fi через root", "KernelSU спросит разрешение один раз", "root_ssid", Monitor.rootSsid(ctx), running)
         FlagRow("Трафик каждого устройства", "Регистрировать новые устройства в роутере: иначе он не считает их трафик", "auto_reg", Ops.autoRegister(ctx), running)
+        FlagRow("Автовыбор канала", "Основным становится модем с лучшим сигналом, при равном — где больше осталось трафика", "auto_main", Ops.autoMain(ctx), running)
         FlagRow("Автолечение модемов", "Нет сети 1,5 мин — переподключить, 5 мин — перезагрузить", "heal", Ops.heal(ctx), running)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) {
@@ -1057,6 +1061,38 @@ private fun ModemSheet(i: Int, c: ModemConfig, m: ModemState?, onReboot: () -> U
             )
         }
 
+        val quota = Ops.quotas.value[i]
+        var editQuota by remember { mutableStateOf(false) }
+        SectionTitle("Трафик")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    quota?.let { gb(it.leftGb) } ?: "—",
+                    color = if (quota != null && quota.leftGb < 5) C.Red else C.Text,
+                    style = Num.copy(fontSize = 26.sp, fontWeight = FontWeight.SemiBold),
+                )
+                if (quota != null) {
+                    val per = quota.perDayGb()
+                    val toRenew = quota.daysToRenew()
+                    Text(
+                        listOfNotNull(
+                            per?.let { "%.1f ГБ в день".format(Locale("ru"), it) },
+                            toRenew?.let { "+${quota.packGb} ГБ через ${plural(it, "день", "дня", "дней")}" },
+                        ).joinToString(" · ").ifEmpty { "осталось" },
+                        color = C.Text3, style = Num.copy(fontSize = 13.sp),
+                    )
+                    if (per != null && per > 0 && toRenew != null && quota.leftGb / per < toRenew) {
+                        Text("Пакета хватит примерно на ${plural((quota.leftGb / per).toInt(), "день", "дня", "дней")}", color = C.Amber, style = Num.copy(fontSize = 13.sp))
+                    }
+                } else {
+                    Text("Укажите, сколько осталось по пакету", color = C.Text3, style = Num.copy(fontSize = 13.sp))
+                }
+            }
+            Pill(if (quota == null) "Указать" else "Изменить", busy = false) { editQuota = true }
+        }
+        if (editQuota) QuotaDialog(i, quota) { editQuota = false }
+
+        if (i !in Ops.ussdOff.value) {
         SectionTitle("Баланс")
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
@@ -1072,6 +1108,7 @@ private fun ModemSheet(i: Int, c: ModemConfig, m: ModemState?, onReboot: () -> U
         if (bal != null && bal.rub == null && bal.text.isNotEmpty()) {
             Spacer(Modifier.height(6.dp))
             Text(bal.text, color = C.Text2, style = MaterialTheme.typography.bodyMedium)
+        }
         }
 
         SectionTitle("Диапазон LTE")
@@ -1127,4 +1164,39 @@ private fun ModemSheet(i: Int, c: ModemConfig, m: ModemState?, onReboot: () -> U
             dismissButton = { TextButton(onClick = { confirmBand = null }) { Text("Отмена", color = C.Text2) } },
         )
     }
+}
+
+@Composable
+private fun QuotaDialog(i: Int, q: Quota?, close: () -> Unit) {
+    val ctx = LocalContext.current
+    var left by remember { mutableStateOf(q?.let { "%.1f".format(Locale.US, it.leftGb).removeSuffix(".0") } ?: "") }
+    var pack by remember { mutableStateOf((q?.packGb ?: 100).toString()) }
+    var day by remember { mutableStateOf(q?.day?.takeIf { it > 0 }?.toString() ?: "") }
+    var roll by remember { mutableStateOf(q?.rollover ?: false) }
+    AlertDialog(
+        onDismissRequest = close,
+        containerColor = C.Raised,
+        title = { Text("Пакет трафика") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(left, { left = it.replace(',', '.').filter { c -> c.isDigit() || c == '.' } }, label = { Text("Осталось сейчас, ГБ") }, singleLine = true)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(pack, { pack = it.filter(Char::isDigit).take(4) }, label = { Text("Пакет, ГБ") }, singleLine = true, modifier = Modifier.weight(1f))
+                    OutlinedTextField(day, { day = it.filter(Char::isDigit).take(2) }, label = { Text("День оплаты") }, singleLine = true, modifier = Modifier.weight(1f))
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Остаток переносится", color = C.Text, fontFamily = Onest, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                    Switch(roll, { roll = it }, colors = SwitchDefaults.colors(checkedTrackColor = C.Green, checkedThumbColor = C.Bg))
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val l = left.toDoubleOrNull()
+                if (l != null) Ops.setQuota(ctx, i, l, pack.toIntOrNull() ?: 100, (day.toIntOrNull() ?: 0).coerceIn(0, 31), roll)
+                close()
+            }) { Text("Сохранить") }
+        },
+        dismissButton = { TextButton(onClick = close) { Text("Отмена", color = C.Text2) } },
+    )
 }
