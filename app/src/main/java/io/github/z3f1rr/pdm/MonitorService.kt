@@ -294,7 +294,10 @@ class MonitorService : Service() {
         }
         modems = states
         heal(states, now)
-        states.forEachIndexed { i, m -> if (m.ok) m.totalBytes?.let { Ops.countTraffic(this, i, it) } }
+        states.forEachIndexed { i, m ->
+            if (m.ok) m.totalBytes?.let { Ops.countTraffic(this, i, it); Stats.addModem(this, i, it) }
+        }
+        Stats.flush(this)
         if (now - lastQuotaLoad > 30_000) { lastQuotaLoad = now; Ops.loadQuotas(this) }
         watchSms(states)
         logRoute(states, now)
@@ -479,7 +482,10 @@ class MonitorService : Service() {
                 (prev ?: RouterState()).copy(error = Monitor.short(e).substringAfter(": "))
             }
             Monitor.post { Ops.router.value = next }
-            if (next.error == null) try { autoMain(k, next) } catch (_: Exception) {}
+            if (next.error == null) {
+                Stats.addDevices(this, next.clients)
+                try { autoMain(k, next) } catch (_: Exception) {}
+            }
         }
         autoBalance()
         return Monitor.intervalSec(this) * 1000L
@@ -697,6 +703,7 @@ class MonitorService : Service() {
     }
 
     override fun onDestroy() {
+        try { Stats.flush(this, force = true) } catch (_: Exception) {}
         releaseAll()
         actions.shutdownNow()
         Monitor.post { Monitor.running.value = false }

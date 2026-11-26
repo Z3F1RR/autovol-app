@@ -110,6 +110,7 @@ private object C {
     val Amber = Color(0xFFFBBF24)
     val Red = Color(0xFFF87171)
     val Blue = Color(0xFF60A5FA)
+    val Violet = Color(0xFFA78BFA)
 }
 
 private val Onest = FontFamily(
@@ -161,6 +162,7 @@ class MainActivity : ComponentActivity() {
         Monitor.ups.value = Monitor.loadUps(this)
         Ops.loadBalances(this)
         Ops.loadQuotas(this)
+        Stats.load(this)
         if (getSharedPreferences("pdm", MODE_PRIVATE).getBoolean("auto", true)) MonitorService.start(this)
         setContent {
             MaterialTheme(colorScheme = Scheme, typography = onestTypography()) { Screen() }
@@ -183,6 +185,8 @@ private fun Screen() {
     var settings by remember { mutableStateOf(false) }
     var modemSheet by remember { mutableStateOf<Int?>(null) }
     var routerSheet by remember { mutableStateOf(false) }
+    var statsSheet by remember { mutableStateOf(false) }
+    val stats = Stats.view.value
     val router = Ops.router.value
     val balances = Ops.balances.value
     var refreshing by remember { mutableStateOf(false) }
@@ -230,6 +234,7 @@ private fun Screen() {
             }
             if (running && where == Where.TRAIN) {
                 if (router != null) RouterCard(router, cfg) { routerSheet = true }
+                if (stats != null) TrafficCard(stats) { statsSheet = true }
                 cfg.forEachIndexed { i, c ->
                     ModemCard(c, snap?.modems?.getOrNull(i), hist.getOrNull(i).orEmpty(), balances[i], Ops.quotas.value[i]) { modemSheet = i }
                 }
@@ -265,6 +270,12 @@ private fun Screen() {
     modemSheet?.let { i ->
         ModalBottomSheet(onDismissRequest = { modemSheet = null }, containerColor = C.Surface) {
             ModemSheet(i, cfg[i], snap?.modems?.getOrNull(i)) { modemSheet = null; reboot = i }
+        }
+    }
+
+    if (statsSheet && stats != null) {
+        ModalBottomSheet(onDismissRequest = { statsSheet = false }, containerColor = C.Surface) {
+            AnalyticsSheet(stats, cfg)
         }
     }
 
@@ -1199,4 +1210,151 @@ private fun QuotaDialog(i: Int, q: Quota?, close: () -> Unit) {
         },
         dismissButton = { TextButton(onClick = close) { Text("Отмена", color = C.Text2) } },
     )
+}
+
+// ---------------------------------------------------------------- traffic analytics
+
+private val SIM_COLORS = listOf(C.Blue, C.Violet)
+
+private fun monthName(): String = SimpleDateFormat("LLLL", Locale("ru")).format(Date())
+
+@Composable
+private fun TrafficCard(v: StatsView, onOpen: () -> Unit) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(C.Surface).clickable(onClick = onOpen).padding(20.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Трафик", color = C.Text, fontFamily = Onest, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text("сегодня " + fmtBytes(v.days.last().total), color = C.Text2, style = Num.copy(fontSize = 14.sp))
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                Text(fmtBytes(v.monthTotal), color = C.Text, style = Num.copy(fontSize = 22.sp, fontWeight = FontWeight.SemiBold))
+                Text("за ${monthName()} · прогноз ${fmtBytes(v.forecast)}", color = C.Text3, style = Num.copy(fontSize = 13.sp))
+            }
+            Bars30(v.days.takeLast(14), Modifier.width(96.dp).height(36.dp))
+        }
+    }
+}
+
+/** Daily bars stacked by SIM; today is the last bar. */
+@Composable
+private fun Bars30(days: List<DayRow>, modifier: Modifier) {
+    Canvas(modifier) {
+        val max = (days.maxOfOrNull { it.total } ?: 0L).coerceAtLeast(1L).toFloat()
+        val slot = size.width / days.size
+        val w = slot * 0.66f
+        days.forEachIndexed { i, d ->
+            var y = size.height
+            d.modems.forEachIndexed { m, b ->
+                val h = b / max * size.height
+                if (h > 0f) {
+                    drawRoundRect(SIM_COLORS[m], topLeft = Offset(i * slot + (slot - w) / 2, y - h), size = Size(w, h), cornerRadius = CornerRadius(2f, 2f))
+                    y -= h
+                }
+            }
+            if (d.total == 0L) {
+                drawRoundRect(C.Line, topLeft = Offset(i * slot + (slot - w) / 2, size.height - 2f), size = Size(w, 2f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun AnalyticsSheet(v: StatsView, cfg: List<ModemConfig>) {
+    val quotas = Ops.quotas.value
+    var allDevices by remember { mutableStateOf(false) }
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(horizontal = 20.dp).padding(bottom = 20.dp)) {
+        Text("Трафик", color = C.Text, fontFamily = Onest, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+
+        Spacer(Modifier.height(14.dp))
+        Row(verticalAlignment = Alignment.Bottom) {
+            Column(Modifier.weight(1f)) {
+                Text(fmtBytes(v.monthTotal), color = C.Text, style = Num.copy(fontSize = 30.sp, fontWeight = FontWeight.SemiBold))
+                Text("за ${monthName()}", color = C.Text3, style = Num.copy(fontSize = 13.sp))
+            }
+            Column(horizontalAlignment = Alignment.End) {
+                Text("≈ " + fmtBytes(v.forecast), color = C.Text2, style = Num.copy(fontSize = 20.sp, fontWeight = FontWeight.Medium))
+                Text("к концу месяца", color = C.Text3, style = Num.copy(fontSize = 13.sp))
+            }
+        }
+        Spacer(Modifier.height(16.dp))
+        Bars30(v.days, Modifier.fillMaxWidth().height(110.dp))
+        Spacer(Modifier.height(6.dp))
+        Row {
+            Text(v.days.first().date.substring(8) + "." + v.days.first().date.substring(5, 7), color = C.Text3, style = Num.copy(fontSize = 11.sp), modifier = Modifier.weight(1f))
+            Text("сегодня", color = C.Text3, style = Num.copy(fontSize = 11.sp))
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            cfg.forEachIndexed { i, c ->
+                Box(Modifier.size(8.dp).clip(CircleShape).background(SIM_COLORS[i]))
+                Spacer(Modifier.width(6.dp))
+                Text(c.name, color = C.Text2, fontFamily = Onest, fontSize = 13.sp)
+                Spacer(Modifier.width(16.dp))
+            }
+            Spacer(Modifier.weight(1f))
+            Text("${fmtBytes(v.perDay)} в день", color = C.Text2, style = Num.copy(fontSize = 13.sp))
+        }
+
+        SectionTitle("SIM")
+        cfg.forEachIndexed { i, c ->
+            val q = quotas[i]
+            val per = v.perDayByModem.getOrNull(i) ?: 0L
+            Column(Modifier.padding(vertical = 8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(SIM_COLORS[i]))
+                    Spacer(Modifier.width(8.dp))
+                    Text(c.name, color = C.Text, fontFamily = Onest, fontSize = 16.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+                    Text(fmtBytes(v.monthByModem.getOrNull(i) ?: 0L), color = C.Text, style = Num.copy(fontSize = 16.sp))
+                }
+                val line = buildList {
+                    add("${fmtBytes(per)} в день")
+                    if (q != null) {
+                        add("осталось ${gb(q.leftGb)}")
+                        val dr = q.daysToRenew()
+                        if (dr != null) {
+                            val atRenew = q.leftGb - per / 1e9 * dr
+                            add(if (atRenew >= 0) "к оплате останется ${gb(atRenew)}" else "не хватит ${gb(-atRenew)}")
+                        } else if (per > 0) {
+                            add("хватит на ${plural((q.leftGb / (per / 1e9)).toInt(), "день", "дня", "дней")}")
+                        }
+                    }
+                }
+                val short = q != null && q.daysToRenew()?.let { q.leftGb - per / 1e9 * it < 0 } == true
+                Text(line.joinToString(" · "), color = if (short) C.Amber else C.Text3, style = Num.copy(fontSize = 13.sp), modifier = Modifier.padding(start = 16.dp))
+            }
+        }
+
+        if (v.devices.isNotEmpty()) {
+            SectionTitle("Устройства за ${monthName()}")
+            val total = v.devices.sumOf { it.month }.coerceAtLeast(1)
+            val list = if (allDevices) v.devices else v.devices.take(10)
+            list.forEach { d ->
+                Column(Modifier.padding(vertical = 7.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(d.name, color = C.Text, fontFamily = Onest, fontSize = 15.sp, maxLines = 1, modifier = Modifier.weight(1f))
+                        Text(fmtBytes(d.month), color = C.Text, style = Num.copy(fontSize = 15.sp))
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.weight(1f).height(4.dp).clip(RoundedCornerShape(2.dp)).background(C.Line)) {
+                            Box(Modifier.fillMaxWidth((d.month.toFloat() / total).coerceIn(0.01f, 1f)).height(4.dp).background(C.Blue))
+                        }
+                        Spacer(Modifier.width(10.dp))
+                        Text(if (d.today > 0) "сегодня ${fmtBytes(d.today)}" else "${d.month * 100 / total}%", color = C.Text3, style = Num.copy(fontSize = 12.sp))
+                    }
+                }
+            }
+            if (v.devices.size > 10) {
+                Text(
+                    if (allDevices) "Свернуть" else "Ещё ${v.devices.size - 10}",
+                    color = C.Text3, fontFamily = Onest, fontSize = 14.sp,
+                    modifier = Modifier.clickable { allDevices = !allDevices }.padding(vertical = 10.dp),
+                )
+            }
+        } else {
+            SectionTitle("Устройства")
+            Text("Появятся, когда роутер начнёт отдавать трафик устройств", color = C.Text2, style = MaterialTheme.typography.bodyMedium)
+        }
+    }
 }
